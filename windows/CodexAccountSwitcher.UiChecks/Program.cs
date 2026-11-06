@@ -344,16 +344,31 @@ internal static class Program
             AssertResponsiveLayout(window.Width);
         }
         client.State = client.State with { Settings = client.State.Settings with { Language = "english" } }; client.RaiseChanged();
-        foreach (var contentWidth in new[] { 792d, 1188 }) {
-            window.Width = contentWidth + frameAndPadding;
-            Render(window, Path.Combine(output, $"responsive-english-unknown-{contentWidth:0}.png"));
-            AssertResponsiveLayout(window.Width);
-            var unknownCard = All<AdaptiveCardGrid>(window).Single().Children.OfType<Border>().Single(card => All<TextBlock>(card).Any(text => text.Text == "Reset Unknown"));
-            var reset = All<Button>(unknownCard).Single(button => Name(button) == "Reset quota");
-            var refresh = All<Button>(unknownCard).Single(button => Name(button) == "Refresh this account");
-            Assert(refresh.TranslatePoint(new Point(), unknownCard).Y >= reset.TranslatePoint(new Point(), unknownCard).Y + reset.ActualHeight,
-                "Unknown English reset counts retain their full text while utility actions wrap inside the minimum-width card.");
-        }
+        var englishMaxWidth = window.MaxWidth;
+        var checkedMinimumWrap = false; var checkedClampedSingleRow = false;
+        try {
+            foreach (var (contentWidth, clamped) in new[] { (792d, false), (1188d, false), (1188d, true) }) {
+                window.MaxWidth = clamped ? 1044 : englishMaxWidth;
+                window.Width = contentWidth + frameAndPadding;
+                Render(window, Path.Combine(output, $"responsive-english-unknown-{contentWidth:0}{(clamped ? "-clamped" : "")}.png"));
+                AssertResponsiveLayout(window.Width);
+                var unknownCard = All<AdaptiveCardGrid>(window).Single().Children.OfType<Border>().Single(card => All<TextBlock>(card).Any(text => text.Text == "Reset Unknown"));
+                var reset = All<Button>(unknownCard).Single(button => Name(button) == "Reset quota");
+                var refresh = All<Button>(unknownCard).Single(button => Name(button) == "Refresh this account");
+                var leading = (FrameworkElement)reset.Parent; var trailing = (FrameworkElement)refresh.Parent;
+                var actions = (FrameworkElement)leading.Parent;
+                var requiredWidth = leading.DesiredSize.Width + 10 + trailing.DesiredSize.Width;
+                var shouldWrap = requiredWidth > actions.ActualWidth;
+                var resetY = reset.TranslatePoint(new Point(), unknownCard).Y;
+                var refreshY = refresh.TranslatePoint(new Point(), unknownCard).Y;
+                Console.WriteLine($"English actions: card={unknownCard.ActualWidth:0.##}, available={actions.ActualWidth:0.##}, required={requiredWidth:0.##}, wrap={shouldWrap}, clamped={clamped}.");
+                Assert(shouldWrap ? refreshY >= resetY + reset.ActualHeight : Math.Abs(refreshY - resetY) <= 1,
+                    "Unknown English reset text remains complete; utilities wrap only when the actual action width needs another row.");
+                checkedMinimumWrap |= unknownCard.ActualWidth <= 381 && shouldWrap;
+                checkedClampedSingleRow |= clamped && window.ActualWidth <= 1045 && unknownCard.ActualWidth > 400 && !shouldWrap;
+            }
+        } finally { window.MaxWidth = englishMaxWidth; }
+        Assert(checkedMinimumWrap && checkedClampedSingleRow, "English actions are exercised both at the minimum card width and in a wider two-column card after the window is clamped.");
         client.State = client.State with { Settings = client.State.Settings with { Language = saved.Settings.Language } }; client.RaiseChanged();
         var previousMaxWidth = window.MaxWidth;
         try {
