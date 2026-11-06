@@ -29,6 +29,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (Usage? Usage, string? Error, DateTimeOffset At, bool UnknownCredits)> directUsage = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, long> usageRevisions = new();
     private Task? automaticUsageTask;
+    private volatile bool initialCycleMayReset;
     private readonly SynchronizationContext context = SynchronizationContext.Current ?? new SynchronizationContext();
     private int usageGeneration;
     private readonly object usageStateLock = new();
@@ -68,6 +69,13 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     public event Action? Changed;
     private void Notify() {
         DetectChangedCredentials();
+        // An initial Swift cycle may spend a reset credit. Remember that even
+        // if auto reset is disabled again before the cycle finishes, so its
+        // completion still invalidates an earlier, pre-consumption fast read.
+        if (!initialCycleMayReset && core is { } runtime && runtime.State.UsageRefreshRevision <= 1 && runtime.State.Settings.AutoResetEnabled) {
+            initialCycleMayReset = true;
+            foreach (var receipt in usageRevisions) if (receipt.Value == 1) usageRevisions.TryUpdate(receipt.Key, 0, 1);
+        }
         Changed?.Invoke();
         if (!directUsageEnabled || usageLifetime.IsCancellationRequested || busy || cancellingLogin || activeCommand == "add" || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount) return;
         // The host owns the only periodic clock. A fresh revision, rather than
@@ -77,29 +85,30 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         var handedOff = false;
         try {
             if (usageLifetime.IsCancellationRequested || cancellingLogin || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount) return;
-            var revision = Math.Max(1, core.State.UsageRefreshRevision);
+            var hostRevision = core.State.UsageRefreshRevision;
+            var revision = Math.Max(initialCycleMayReset ? 0 : 1, hostRevision);
             var ids = core.State.Accounts.Select(row => row.Profile.Id).Where(id => !resetNeedsRefresh.ContainsKey(id) &&
                 (!directUsage.ContainsKey(id) || !usageRevisions.TryGetValue(id, out var consumed) || consumed < revision)).ToArray();
             if (ids.Length == 0) return;
             var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             automaticUsageTask = completion.Task; activeCommand = "automaticQuotaRefresh"; busy = true; handedOff = true;
-            _ = ReadAutomaticUsageAsync(ids, revision, Volatile.Read(ref usageGeneration), completion);
+            _ = ReadAutomaticUsageAsync(ids, revision, Volatile.Read(ref usageGeneration), completion, initialFastRead: hostRevision == 0);
         } finally { if (!handedOff) commands.Release(); }
     }
-    private async Task ReadAutomaticUsageAsync(Guid[] ids, long revision, int generation, TaskCompletionSource completion) {
+    private async Task ReadAutomaticUsageAsync(Guid[] ids, long revision, int generation, TaskCompletionSource completion, bool initialFastRead) {
         try {
             Notify();
-            await Task.WhenAll(ids.Select(id => ReadRevisionAsync(id, revision, generation)));
+            await Task.WhenAll(ids.Select(id => ReadRevisionAsync(id, revision, generation, initialFastRead: initialFastRead)));
         }
         finally {
             busy = false; activeCommand = null; commands.Release(); completion.TrySetResult();
             if (!usageLifetime.IsCancellationRequested) context.Post(_ => Notify(), null);
         }
     }
-    private async Task ReadRevisionAsync(Guid id, long revision, int generation, bool reconcileReset = false) {
+    private async Task ReadRevisionAsync(Guid id, long revision, int generation, bool reconcileReset = false, bool initialFastRead = false) {
         await RefreshDirectUsageAsync(id, generation, reconcileReset: reconcileReset);
         // Failed reads count too: duplicate snapshots must not form a retry loop.
-        lock (usageStateLock) { if (generation == usageGeneration) usageRevisions[id] = revision; }
+        lock (usageStateLock) { if (generation == usageGeneration) usageRevisions[id] = initialFastRead && initialCycleMayReset ? 0 : revision; }
     }
     private async Task<string?> RefreshDirectUsageAsync(Guid id, int generation, bool afterReset = false, bool reconcileReset = false) {
         var entered = false;
@@ -244,7 +253,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     public async Task InitializeAsync()
     {
         var runtime = runtimeFactory();
-        usageRevisions.Clear();
+        usageRevisions.Clear(); initialCycleMayReset = false;
         core = runtime; initialized = false; runtime.Changed += Notify;
         try { await runtime.InitializeAsync(); initialized = true; Notify(); }
         catch { runtime.Changed -= Notify; await runtime.DisposeAsync(); if (core == runtime) core = null; throw; }

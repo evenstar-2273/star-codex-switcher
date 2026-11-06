@@ -11,10 +11,44 @@ internal static class QuotaRefreshChecks
     {
         try {
             await ManagedAsync();
+            await InitialResetCycleAsync();
             if (host != null) await HostAsync(Path.GetFullPath(host));
             Console.WriteLine($"PASS: {passed} quota refresh assertions; single revision-driven direct batch, configured periodic clock, disabled/manual behavior, persistence and account-operation coordination.");
             return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }
+    }
+    private static async Task InitialResetCycleAsync()
+    {
+        foreach (var enabledAtStart in new[] { true, false }) {
+            using var fixture = new Fixture(enabledAtStart);
+            await using var client = fixture.Client; await client.InitializeAsync(); await Idle(client);
+            Check(fixture.TotalReads == 2 && client.State.Accounts.All(row => row.Usage?.ResetCreditsRemaining == 2), "Startup reads the initial credit balance even with ordinary polling disabled.");
+            if (!enabledAtStart) {
+                fixture.Runtime.Publish(fixture.Runtime.State with { Settings = fixture.Runtime.State.Settings with { AutoResetEnabled = true } });
+                fixture.Runtime.Publish(fixture.Runtime.State with { Settings = fixture.Runtime.State.Settings with { AutoResetEnabled = false } });
+            }
+            Check(fixture.TotalReads == 2, "Observing an initial-cycle auto-reset setting does not itself duplicate the pending fast read.");
+            fixture.ReadRemaining = 100; fixture.Credits.Available = 0;
+            fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = 1 }); await Idle(client);
+            Check(fixture.TotalReads == 4 && client.State.Accounts.All(row => row.Usage?.ResetCreditsRemaining == 0 && row.Usage.RemainingPercent == 100),
+                "A possibly spending first host cycle forces one direct readback even when periodic polling is disabled or auto reset was toggled off meanwhile.");
+            fixture.Runtime.Publish(fixture.Runtime.State); await Task.Delay(35);
+            Check(fixture.TotalReads == 4, "The verified first-cycle readback is consumed once, without a completion snapshot retry loop.");
+        }
+        using (var fixture = new Fixture()) {
+            fixture.ReadGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var client = fixture.Client; await client.InitializeAsync();
+            await Until(() => fixture.ActiveReads == 2);
+            fixture.Runtime.Publish(fixture.Runtime.State with { Settings = fixture.Runtime.State.Settings with { AutoResetEnabled = true } });
+            fixture.ReadRemaining = 100; fixture.Credits.Available = 0;
+            fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = 1 });
+            Check(fixture.TotalReads == 2 && client.State.IsMutating, "A completed first host reset waits for the pending fast read without starting an overlapping batch.");
+            fixture.ReadGate.SetResult(); await Idle(client); fixture.ReadGate = null;
+            Check(fixture.TotalReads == 4 && client.State.Accounts.All(row => row.Usage?.RemainingPercent == 100 && row.Usage.ResetCreditsRemaining == 0),
+                "A fast read started before auto reset was enabled cannot falsely consume the completed first-cycle revision when it returns late.");
+            fixture.Runtime.Publish(fixture.Runtime.State); await Task.Delay(35);
+            Check(fixture.TotalReads == 4, "The actual post-cycle revision-one readback is retained and does not loop back to revision zero.");
+        }
     }
     private static async Task ManagedAsync()
     {
@@ -167,26 +201,29 @@ internal static class QuotaRefreshChecks
         public int TotalReads => Reads.Values.Sum();
         public TaskCompletionSource? ReadGate;
         public bool FailReads;
+        public int ReadRemaining = 80;
+        public readonly Credits Credits = new();
         public readonly Runtime Runtime;
         public readonly GuardedAccountClient Client;
         public readonly byte[] OriginalBytes;
         public string ActiveCredential => Path.Combine(root, "active", "auth.json");
         private string Saved(int index) => Path.Combine(root, "data", "accounts", IDs[index].ToString().ToUpperInvariant(), "auth.json");
-        public Fixture() {
+        public Fixture(bool autoResetEnabled = false) {
             for (var i = 0; i < IDs.Length; i++) { Directory.CreateDirectory(Path.GetDirectoryName(Saved(i))!); File.WriteAllBytes(Saved(i), GuardedChecks.Credential(IDs[i].ToString()).Bytes); }
             OriginalBytes = File.ReadAllBytes(Saved(0)); Directory.CreateDirectory(Path.GetDirectoryName(ActiveCredential)!); File.WriteAllBytes(ActiveCredential, OriginalBytes);
-            Runtime = new(AccountSnapshot.Empty with { Settings = new(QuotaRefreshIntervalMinutes: 0),
+            Runtime = new(AccountSnapshot.Empty with { Settings = new(AutoResetEnabled: autoResetEnabled, QuotaRefreshIntervalMinutes: 0),
                 Accounts = IDs.Select(id => new AccountRow(new(id, "Fixture", "quota@example.test"), "Q", null, null)).ToArray(), ActiveAccountID = IDs[0] });
-            Client = new(Path.Combine(root, "data"), Path.Combine(root, "active"), () => Runtime, new Credits(), ReadAsync, new Validator());
+            Client = new(Path.Combine(root, "data"), Path.Combine(root, "active"), () => Runtime, Credits, ReadAsync, new Validator());
         }
         public void ReplaceCredential(int index) => File.AppendAllText(Saved(index), "\n");
         private async Task<Usage> ReadAsync(LoginCredential credential, CancellationToken ct) {
             var id = Guid.Parse(credential.AccountID); Reads.AddOrUpdate(id, 1, (_, value) => value + 1);
             var active = Interlocked.Increment(ref ActiveReads); MaximumReads = Math.Max(MaximumReads, active);
+            var remaining = ReadRemaining;
             try {
                 if (ReadGate != null) await ReadGate.Task.WaitAsync(ct);
                 if (FailReads) throw new IOException("synthetic network failure");
-                return new(80, DateTimeOffset.UtcNow.AddDays(1), 90, DateTimeOffset.UtcNow.AddHours(2), 2);
+                return new(remaining, DateTimeOffset.UtcNow.AddDays(1), 90, DateTimeOffset.UtcNow.AddHours(2), 2);
             } finally { Interlocked.Decrement(ref ActiveReads); }
         }
         public void Dispose() => SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root);
@@ -208,7 +245,8 @@ internal static class QuotaRefreshChecks
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     private sealed class Credits : IResetCreditService {
-        public Task<ResetCreditSnapshot> ReadAsync(LoginCredential credential, CancellationToken ct) => Task.FromResult(new ResetCreditSnapshot(2, null));
+        public int Available = 2;
+        public Task<ResetCreditSnapshot> ReadAsync(LoginCredential credential, CancellationToken ct) => Task.FromResult(new ResetCreditSnapshot(Available, null));
         public Task ConsumeAsync(LoginCredential credential, CancellationToken ct) => throw new Exception("Scheduling may not spend a reset credit.");
     }
     private sealed class Validator : ILoginValidator { public Task ValidateAsync(LoginCredential credential, CancellationToken ct) => Task.CompletedTask; }
