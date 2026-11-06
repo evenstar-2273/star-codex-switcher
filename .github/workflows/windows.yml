@@ -1,0 +1,89 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: compnerd/gha-setup-swift@397094e75494a93fa8d81db0268dbc8f5d6cf7c6
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --version=3.11 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed.' }
+      - name: Build host and bundled runtime from source
+        shell: pwsh
+        run: |
+          ./scripts/package-windows.ps1 -OutputDirectory ./windows/artifacts/source-build
+          Expand-Archive -LiteralPath ./windows/artifacts/source-build/SwiftRuntime.zip -DestinationPath ./windows/artifacts/installer-runtime -Force
+      - name: Check guarded login, import and recovery
+        shell: pwsh
+        run: |
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- guarded ./windows/artifacts/installer-runtime/SwitcherHost.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Guarded checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- plans
+          if ($LASTEXITCODE -ne 0) { throw 'Plan metadata checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- reset-credits
+          if ($LASTEXITCODE -ne 0) { throw 'Reset credit checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- subscriptions
+          if ($LASTEXITCODE -ne 0) { throw 'Subscription checks failed.' }
+      - name: Check WPF with synthetic accounts
+        shell: pwsh
+        run: |
+          dotnet run --project windows/CodexAccountSwitcher.UiChecks -c Release -- ./windows/artifacts/ui
+          if ($LASTEXITCODE -ne 0) { throw 'WPF checks failed.' }
+      - name: Package current-user installer
+        shell: pwsh
+        run: |
+          $nsisPath = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
+          if (!(Test-Path -LiteralPath $nsisPath)) { throw 'NSIS executable not found.' }
+          ./scripts/package-installed.ps1 -SwiftRuntimeDirectory ./windows/artifacts/installer-runtime -Dotnet (Get-Command dotnet).Source -Makensis $nsisPath -OutputDirectory ./windows/artifacts/release -GitHubRepository $env:GITHUB_REPOSITORY
+      - name: Check packaged application without SDK paths
+        shell: pwsh
+        run: |
+          $publish = (Get-Content -Raw ./windows/artifacts/latest-installed-build.txt).Trim()
+          $executable = Join-Path $publish 'Codex-Account-Switcher-windows-x64.exe'
+          $start = [Diagnostics.ProcessStartInfo]::new($executable, '--self-test')
+          $start.UseShellExecute = $false
+          $start.CreateNoWindow = $true
+          $start.WindowStyle = 'Hidden'
+          $start.Environment['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
+          foreach ($name in @('CODEX_SWITCHER_HOST_PATH', 'DOTNET_ROOT', 'SDKROOT', 'SWIFT_ROOT', 'SWIFT_PATH')) { $start.Environment.Remove($name) | Out-Null }
+          $start.Environment['CODEX_SWITCHER_SELF_TEST_RESULT'] = Join-Path $pwd 'windows/artifacts/self-test.txt'
+          $process = [Diagnostics.Process]::Start($start)
+          if (!$process.WaitForExit(45000)) { $process.Kill($true); throw 'Packaged self-test timed out.' }
+          if ($process.ExitCode -ne 0) { throw 'Packaged self-test failed.' }
+          Get-Content ./windows/artifacts/self-test.txt
+      - name: Upload installer and matching update manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-${{ github.sha }}
+          path: |
+            windows/artifacts/release/*-Setup-x64.exe
+            windows/artifacts/release/*.sha256
+            windows/artifacts/release/update-installed.json
+          if-no-files-found: error
+      - name: Upload synthetic UI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-ui-${{ github.sha }}
+          path: windows/artifacts/ui/*.png
+          if-no-files-found: ignore

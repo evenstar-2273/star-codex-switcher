@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, cite Star Codex Switcher."
+title: "Star Codex Switcher"
+type: software
+authors:
+  - family-names: "evenstar-2273"
+    alias: "evenstar-2273"
+    website: "https://github.com/evenstar-2273"
+repository-code: "https://github.com/evenstar-2273/star-codex-switcher"
+url: "https://github.com/evenstar-2273/star-codex-switcher"
+keywords:
+  - Codex
+  - Windows
+  - account switching
+  - usage tracking
