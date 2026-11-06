@@ -116,52 +116,73 @@ public static class UpdateInstaller
 
     public static async Task ApplyInstalledAsync(UpdateJob job, Func<string, Task> launchAndVerify, string? uninstallKey = null)
     {
-        if (job.PackageType != "installer" || job.AppSha256 == null || Path.GetFileName(job.Target) != Distribution.ExecutableName)
+        if (job.PackageType != "installer" || job.AppSha256 == null ||
+            (Path.GetFileName(job.Target) != Distribution.ExecutableName && Path.GetFileName(job.Target) != Distribution.LegacyExecutableName))
             throw new IOException("安装更新任务无效。");
         SecureFiles.RejectLinks(job.Target); SecureFiles.RejectLinks(job.Payload);
         VerifyPayload(job.Payload, job.Sha256, job.Version);
         if (Hash(job.Target) != job.OldSha256) throw new IOException("当前程序已改变，取消更新。");
         var directory = Path.GetDirectoryName(job.Target)!;
+        var newTarget = Path.Combine(directory, Distribution.ExecutableName);
+        var legacyTarget = Path.Combine(directory, Distribution.LegacyExecutableName);
         var uninstaller = Path.Combine(directory, "Uninstall.exe");
+        SecureFiles.RejectLinks(uninstaller);
         var backup = Path.Combine(Path.GetDirectoryName(job.Payload)!, "installed-backup");
         SecureFiles.CreatePrivateDirectory(backup);
-        File.Copy(job.Target, Path.Combine(backup, Distribution.ExecutableName), true);
+        File.Copy(job.Target, Path.Combine(backup, Path.GetFileName(job.Target)), true);
+        var otherTarget = job.Target == newTarget ? legacyTarget : newTarget;
+        SecureFiles.RejectLinks(otherTarget);
+        var otherHash = File.Exists(otherTarget) ? Hash(otherTarget) : null;
+        if (otherHash != null) { SecureFiles.RejectLinks(otherTarget); File.Copy(otherTarget, Path.Combine(backup, Path.GetFileName(otherTarget)), true); }
         if (File.Exists(uninstaller)) File.Copy(uninstaller, Path.Combine(backup, "Uninstall.exe"), true);
         using var registry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(uninstallKey ?? Distribution.UninstallKey, writable: true);
-        var oldVersion = registry?.GetValue("DisplayVersion");
+        var registrationSnapshot = new InstalledRegistrationSnapshot(registry);
         try {
             // NSIS requires /D= to be last and unquoted, even for paths containing spaces.
             if (directory.Contains('"') || directory.Contains('\r') || directory.Contains('\n')) throw new IOException("安装路径不受支持。");
             var start = new ProcessStartInfo(job.Payload) {
                 UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
-                Arguments = "/S /UPDATE /D=" + directory
+                Arguments = "/S /UPDATE /MODERNUPDATE /D=" + directory
             };
             using var installer = Process.Start(start) ?? throw new IOException("安装程序无法启动。");
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
             try { await installer.WaitForExitAsync(timeout.Token); }
             catch { if (!installer.HasExited) { installer.Kill(entireProcessTree: true); await installer.WaitForExitAsync(); } throw; }
+            finally { registrationSnapshot.CaptureInstalled(registry); }
             if (installer.ExitCode != 0) throw new IOException($"安装更新失败（{installer.ExitCode}）。");
-            VerifyPayload(job.Target, job.AppSha256, job.Version);
-            await launchAndVerify(job.Target);
+            VerifyPayload(newTarget, job.AppSha256, job.Version);
+            await launchAndVerify(newTarget);
         } catch {
-            if (File.Exists(job.Target)) {
-                var currentHash = Hash(job.Target);
-                if (currentHash != job.OldSha256 && currentHash != job.AppSha256)
+            foreach (var path in new[] { job.Target, otherTarget }) {
+                if (!File.Exists(path)) continue;
+                var currentHash = Hash(path);
+                var previousHash = path == job.Target ? job.OldSha256 : otherHash;
+                if (currentHash != previousHash && currentHash != job.AppSha256)
                     throw new IOException("安装期间程序被其他操作修改，未覆盖该文件；旧版备份：" + backup);
             }
-            File.Copy(Path.Combine(backup, Distribution.ExecutableName), job.Target, true);
+            File.Copy(Path.Combine(backup, Path.GetFileName(job.Target)), job.Target, true);
+            if (otherHash != null) File.Copy(Path.Combine(backup, Path.GetFileName(otherTarget)), otherTarget, true);
+            else if (File.Exists(otherTarget)) File.Delete(otherTarget);
             if (File.Exists(Path.Combine(backup, "Uninstall.exe"))) File.Copy(Path.Combine(backup, "Uninstall.exe"), uninstaller, true);
-            if (oldVersion != null) registry?.SetValue("DisplayVersion", oldVersion);
+            registrationSnapshot.Restore(registry);
+            var migration = Path.Combine(directory, InstalledMigration.MarkerName);
+            if (File.Exists(migration)) File.Delete(migration);
             throw;
         }
     }
 
-    public static async Task LaunchAndVerifyAsync(string target, bool selfTest = false)
+    public static async Task LaunchAndVerifyAsync(string target, bool selfTest = false, string[]? forwardedArgs = null)
     {
         var eventName = @"Local\CodexSwitcherUpdateReady-" + Guid.NewGuid().ToString("N");
         using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, eventName);
         var start = new ProcessStartInfo(target) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(target)! };
         if (selfTest) start.ArgumentList.Add("--self-test");
+        if (forwardedArgs != null) {
+            for (var index = 0; index < forwardedArgs.Length; index++) {
+                if (forwardedArgs[index] == "--update-ready") { index++; continue; }
+                start.ArgumentList.Add(forwardedArgs[index]);
+            }
+        }
         start.ArgumentList.Add("--update-ready"); start.ArgumentList.Add(eventName);
         using var process = Process.Start(start) ?? throw new IOException("无法启动更新后的程序。");
         try {
@@ -182,6 +203,35 @@ public static class UpdateInstaller
         var index = Array.IndexOf(args, "--update-ready");
         if (index < 0 || index + 1 >= args.Length || !args[index + 1].StartsWith(@"Local\CodexSwitcherUpdateReady-", StringComparison.Ordinal)) return;
         try { using var ready = EventWaitHandle.OpenExisting(args[index + 1]); ready.Set(); } catch (WaitHandleCannotBeOpenedException) { }
+    }
+
+    public static async Task<bool> RedirectLegacyLaunchAsync(string[] args)
+    {
+        var current = Environment.ProcessPath;
+        if (current == null || !string.Equals(Path.GetFileName(current), Distribution.LegacyExecutableName, StringComparison.OrdinalIgnoreCase)
+            || Array.IndexOf(args, "--prepare-install") >= 0) return false;
+        var migration = InstalledMigration.Read(Path.GetDirectoryName(current)!);
+        if (migration == null) return false;
+        SecureFiles.RejectLinks(migration.Current);
+        var hash = Hash(current);
+        if (Hash(migration.Current) != hash) throw new IOException("安装迁移校验失败。");
+        try {
+            await LaunchAndVerifyAsync(migration.Current, forwardedArgs: args);
+            SignalReady(args);
+            return true;
+        } catch { migration.CancelLegacyHandoff(hash); throw; }
+    }
+
+    public static async Task SignalReadyAsync(string[] args)
+    {
+        SignalReady(args);
+        var current = Environment.ProcessPath;
+        if (current == null || !string.Equals(Path.GetFileName(current), Distribution.ExecutableName, StringComparison.OrdinalIgnoreCase)) return;
+        // Cleanup is retryable; a valid startup must not be turned into an update failure by a locked shortcut.
+        try { var migration = InstalledMigration.Read(Path.GetDirectoryName(current)!); if (migration != null) await migration.CompleteAsync(); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        catch (System.Runtime.InteropServices.COMException) { }
     }
 
     public static async Task RunHelperAsync(string jobPath)

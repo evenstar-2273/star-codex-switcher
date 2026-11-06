@@ -20,7 +20,7 @@ $archive=Join-Path $stage 'SwiftRuntime.zip'
 $publish=Join-Path $stage 'publish'
 & $Dotnet publish (Join-Path $projectRoot 'windows\CodexAccountSwitcher\CodexAccountSwitcher.csproj') -c Release -r win-x64 --self-contained true -o $publish -p:InstalledEdition=true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false "-p:SwiftRuntimeArchive=$archive" --nologo
 if($LASTEXITCODE -ne 0){throw 'Installed build failed'}
-$app=Join-Path $publish 'Codex-Account-Switcher-windows-x64.exe'
+$app=Join-Path $publish 'Star-Codex-Switcher-windows-x64.exe'
 $fileVersion=(Get-Item -LiteralPath $app).VersionInfo.FileVersion
 $parsedVersion=[Version]::Parse($fileVersion)
 $releaseVersion=if($parsedVersion.Revision -eq 0){$parsedVersion.ToString(3)}else{$parsedVersion.ToString()}
@@ -30,12 +30,12 @@ if (!$BaseUrl) { $BaseUrl = "https://github.com/$GitHubRepository/releases/downl
 $baseUri = [Uri]$BaseUrl
 if (!$baseUri.IsAbsoluteUri -or $baseUri.Scheme -ne 'https' -or $baseUri.Query -or $baseUri.Fragment -or $baseUri.UserInfo) { throw 'BaseUrl must be an absolute HTTPS download directory' }
 $BaseUrl = $BaseUrl.TrimEnd('/')
-$setup=Join-Path $OutputDirectory ("Codex-Account-Switcher-$releaseVersion-Setup-x64.exe")
+$setup=Join-Path $OutputDirectory ("Star-Codex-Switcher-$releaseVersion-Setup-x64.exe")
 & $Makensis /INPUTCHARSET UTF8 /V2 "/DAPP_VERSION=$fileVersion" "/DAPP_EXE=$app" "/DOUTPUT_FILE=$setup" (Join-Path $projectRoot 'windows\installer\setup.nsi')
 if($LASTEXITCODE -ne 0){throw 'NSIS build failed'}
 $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($setup+'.sha256',"$hash  $([IO.Path]::GetFileName($setup))`n",[Text.UTF8Encoding]::new($false))
-$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：四组渐变主题；实时订阅有效期与套餐识别修复；安装版自动升级并重启；JSON 文本与文件导入；手动重置及二次确认。"}
+$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：统一 Star Codex Switcher 产品、程序及安装包名称；修复中文系统界面混用英文和登录错误未翻译；兼容旧版自动升级与启动失败回滚；保留账号、登录数据和快捷方式选择。"}
 [IO.File]::WriteAllText((Join-Path $OutputDirectory 'update-installed.json'),($feed|ConvertTo-Json)+"`n",[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $projectRoot 'windows\artifacts\latest-installed-build.txt'),$publish)
 Write-Output $setup

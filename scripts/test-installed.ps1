@@ -14,9 +14,10 @@ $id=[Guid]::NewGuid().ToString('N')
 $registryKey='Software\Microsoft\Windows\CurrentVersion\Uninstall\StarCodexInstallerTest-'+$id
 $registryPath='HKCU:\'+$registryKey
 $shortcut='Star Codex Installer Test '+$id
+$legacyShortcut='Star Codex Legacy Installer Test '+$id
 $setup=Join-Path $testRoot 'test-setup.exe'
 $version=(Get-Item -LiteralPath $AppExecutable).VersionInfo.FileVersion
-& $Makensis /INPUTCHARSET UTF8 /V2 /DTEST_MODE=1 "/DREGKEY=$registryKey" "/DSHORTCUT=$shortcut" "/DAPP_VERSION=$version" "/DAPP_EXE=$([IO.Path]::GetFullPath($AppExecutable))" "/DOUTPUT_FILE=$setup" (Join-Path $projectRoot 'windows\installer\setup.nsi')
+& $Makensis /INPUTCHARSET UTF8 /V2 /DTEST_MODE=1 "/DREGKEY=$registryKey" "/DSHORTCUT=$shortcut" "/DLEGACY_SHORTCUT=$legacyShortcut" "/DAPP_VERSION=$version" "/DAPP_EXE=$([IO.Path]::GetFullPath($AppExecutable))" "/DOUTPUT_FILE=$setup" (Join-Path $projectRoot 'windows\installer\setup.nsi')
 if($LASTEXITCODE -ne 0){throw 'NSIS test build failed'}
 $priorEnvironment=@{}
 foreach($name in @('CODEX_SWITCHER_DATA_HOME','CODEX_HOME','CODEX_CLI_PATH')){$priorEnvironment[$name]=[Environment]::GetEnvironmentVariable($name)}
@@ -29,7 +30,7 @@ $sentinel=Join-Path $env:CODEX_SWITCHER_DATA_HOME 'preserve.txt'
 $codexSentinel=Join-Path $env:CODEX_HOME 'auth.json'
 [IO.File]::WriteAllText($codexSentinel,'{"test_only":true}')
 $install=Join-Path $testRoot '安装 程序'
-$app=Join-Path $install 'CodexAccountSwitcher.exe'
+$app=Join-Path $install 'StarCodexSwitcher.exe'
 $uninstaller=Join-Path $install 'Uninstall.exe'
 $desktop=Join-Path ([Environment]::GetFolderPath('Desktop')) ($shortcut+'.lnk')
 $menu=Join-Path ([Environment]::GetFolderPath('Programs')) ($shortcut+'.lnk')
@@ -64,8 +65,16 @@ try {
  Run-Process $setup ('/S /UPDATE /D='+$install) 15
  Assert ((Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash -eq $before) 'Downgrade guard modified app'
  Set-ItemProperty -LiteralPath $registryPath -Name DisplayVersion -Value $version
- & $Dotnet run --project (Join-Path $projectRoot 'windows\CodexAccountSwitcher.InstallerChecks\CodexAccountSwitcher.InstallerChecks.csproj') -c Release -- $setup $app $testRoot $registryKey ([IO.Path]::GetFullPath($PreviousExecutable))
+ & $Dotnet run --project (Join-Path $projectRoot 'windows\CodexAccountSwitcher.InstallerChecks\CodexAccountSwitcher.InstallerChecks.csproj') -c Release --artifacts-path (Join-Path $testRoot 'check-build') -- $setup $app $testRoot $registryKey ([IO.Path]::GetFullPath($PreviousExecutable))
  if($LASTEXITCODE -ne 0){throw 'Installed updater checks failed'}
+ # An unrelated same-name shortcut must survive uninstall.
+ $shell=New-Object -ComObject WScript.Shell
+ $link=$shell.CreateShortcut($desktop)
+ $link.TargetPath=Join-Path $env:SystemRoot 'System32\notepad.exe'
+ $link.Save()
+ [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link)
+ [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+ $foreignShortcutHash=(Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash
  $unknown=Join-Path $install 'user-owned-file.txt'
  [IO.File]::WriteAllText($unknown,'keep unknown files')
  Run-Process $uninstaller '/S'
@@ -74,7 +83,9 @@ try {
  Assert (!(Test-Path -LiteralPath $app)) 'Uninstall retained app'
  Assert (!(Test-Path -LiteralPath $uninstaller)) 'Uninstall retained uninstaller'
  Assert (!(Test-Path -LiteralPath $registryPath)) 'Uninstall retained registration'
- Assert (!(Test-Path -LiteralPath $desktop) -and !(Test-Path -LiteralPath $menu)) 'Uninstall retained shortcuts'
+ Assert (!(Test-Path -LiteralPath $menu)) 'Uninstall retained owned shortcut'
+ Assert ((Test-Path -LiteralPath $desktop) -and (Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash -eq $foreignShortcutHash) 'Uninstall changed unrelated same-name shortcut'
+ Remove-Item -LiteralPath $desktop
  Assert ([IO.File]::ReadAllText($unknown) -eq 'keep unknown files') 'Uninstall removed unknown file'
  Assert ([IO.File]::ReadAllText($sentinel) -eq 'do not delete user accounts') 'Account data changed'
  Assert ([IO.File]::ReadAllText($codexSentinel) -eq '{"test_only":true}') 'Codex authentication data changed'

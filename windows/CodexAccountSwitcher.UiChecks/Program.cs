@@ -71,8 +71,10 @@ internal static class Program
             var native = new NativeSettings(settingsKey) { ThemePreference = "light" };
             var client = new FixtureClient();
             var window = new MainWindow(client, native);
+            Assert(window.Title == App.DisplayName, "The main window uses the agreed Star Codex Switcher display name.");
             Assert(window.Icon != null, "The taskbar and title bar must use the packaged application logo.");
             BrandingChecks.Run();
+            LanguageChecks.Run(native, output);
             Render(window, Path.Combine(output, "accounts-zh.png"));
             Assert(window.ResizeMode == ResizeMode.CanResize && window.MinWidth >= 420,
                 "Home is a normal resizable desktop window with a usable minimum width.");
@@ -109,6 +111,7 @@ internal static class Program
             Assert(All<Button>(window).Any(button => Name(button) == "粘贴 JSON"),
                 "The account list exposes import directly.");
             var pasteWindow = new JsonImportWindow(client) { Owner = window };
+            Assert(pasteWindow.Title == "导入账号 · " + App.DisplayName, "Import dialogs use the same product display name.");
             Render(pasteWindow, Path.Combine(output, "paste-json-zh.png"));
             var editor = All<TextBox>(pasteWindow).Single();
             var importButton = All<Button>(pasteWindow).Single(button =>
@@ -134,7 +137,7 @@ internal static class Program
             var addButton = All<Button>(window).Single(button => System.Windows.Automation.AutomationProperties.GetName(button) == client.State.Text("add_account"));
             Assert(addButton.IsEnabled, "Add account is available directly on the account list.");
             window.Navigate("settings"); Render(window, Path.Combine(output, "settings-zh.png"));
-            Assert(All<TextBlock>(window).Any(text => text.Text == client.State.Text("current_version").Replace("%@", native.DisplayVersion)), "The settings footer uses the public display version.");
+            Assert(All<TextBlock>(window).Any(text => text.Text == "当前版本：" + native.DisplayVersion), "The settings footer uses the public display version and Windows-localized label.");
             Assert(All<TextBlock>(window).Any(t => t.Text == "托盘显示额度") && !All<TextBlock>(window).Any(t => t.Text == "status_bar_usage_window"), "The tray quota label must have a Chinese fallback when the host omits its translation.");
             Assert(!All<CheckBox>(window).Any(toggle => System.Windows.Automation.AutomationProperties.GetName(toggle) == "显示 5 小时用量"),
                 "Five-hour visibility is inferred from account data, without a settings toggle.");

@@ -14,6 +14,10 @@ internal static class BrandingChecks
 
     public static void Run()
     {
+        Require(typeof(App).Assembly.GetName().Name == "Star-Codex-Switcher-windows-x64", "The executable assembly uses the Star Codex Switcher package name.");
+        Require(App.DisplayName == "Star Codex Switcher", "Visible product naming keeps the agreed title casing.");
+        Require(App.DefaultDataDirectory == Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Codex Account Switcher"),
+            "Renaming the product must preserve the existing account data directory.");
         var artwork = Resource("logo.png");
         Require(Convert.ToHexString(SHA256.HashData(artwork)) == SelectedPngSha256,
             "The packaged PNG must be the selected Star Codex Switcher S-arrow/star artwork.");
@@ -54,7 +58,7 @@ internal static class BrandingChecks
     }
     private static byte[] Resource(string name)
     {
-        var uri = new Uri("pack://application:,,,/Codex-Account-Switcher-windows-x64;component/" + name);
+        var uri = App.ResourceUri(name);
         using var stream = Application.GetResourceStream(uri).Stream;
         using var bytes = new MemoryStream(); stream.CopyTo(bytes); return bytes.ToArray();
     }

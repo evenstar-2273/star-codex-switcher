@@ -42,11 +42,21 @@ $nsisPath = (Get-Command makensis).Source
 ./scripts/package-installed.ps1 -SwiftRuntimeDirectory ./windows/artifacts/installer-runtime -Dotnet $dotnetPath -Makensis $nsisPath -OutputDirectory ./windows/artifacts/release
 ```
 
-面向用户的版本从 `1.0.0` 开始，后续按 `1.0.1`、`1.0.2` 递增。内部 `FileVersion` 使用四段形式（如 `1.0.0.0`），文件名和 Release tag 使用三段形式（如 `v1.0.0`）。可以通过 `-ReleaseTag` 显式指定；必须与实际 GitHub Release tag 完全一致。构建脚本同时生成：
+面向用户的版本从 `1.0.0` 开始；本次更名版本为 `1.0.1`，后续按 `1.0.2`、`1.0.3` 递增。内部 `FileVersion` 使用四段形式（如 `1.0.1.0`），文件名和 Release tag 使用三段形式（如 `v1.0.1`）。可以通过 `-ReleaseTag` 显式指定；必须与实际 GitHub Release tag 完全一致。
 
-- `Codex-Account-Switcher-<版本>-Setup-x64.exe`
-- 对应 `.exe.sha256`
-- `update-installed.json`
+1.0.1 的交付名称如下；仓库地址中的 `star-codex-switcher` 保持不变：
+
+| 用途 | 名称 |
+| --- | --- |
+| 显示标题、快捷方式、安装显示名 | `Star Codex Switcher` |
+| 安装包 | `Star-Codex-Switcher-1.0.1-Setup-x64.exe` |
+| 安装后的主程序 | `StarCodexSwitcher.exe` |
+| 开发/打包中间应用 | `Star-Codex-Switcher-windows-x64.exe` |
+| 源码包 | `Star-Codex-Switcher-1.0.1-source.zip` |
+| 安装包校验文件 | `Star-Codex-Switcher-1.0.1-Setup-x64.exe.sha256` |
+| 更新清单 | `update-installed.json` |
+
+安装脚本生成安装包、校验文件与更新清单。源码包从本次验证通过并提交的同一源码生成，不混入构建目录或账号数据。新用户默认安装路径为 `%LOCALAPPDATA%\Programs\Star Codex Switcher`；旧用户升级沿用现有安装位置。更名时保留既有账号数据目录、登录记录和设置存储。
 
 安装包清单含安装包哈希与内置应用哈希；重新构建安装包后必须重新生成清单，不得只更换 EXE。
 
@@ -62,12 +72,16 @@ $nsisPath = (Get-Command makensis).Source
 
 ## 发布步骤
 
-1. 更新版本号、`CHANGELOG.md` 与本次提交信息。确认源码检查、界面截图与安装包检查通过。
-2. 在隔离 Windows 用户或测试机验证首次安装、保留账号数据的升级、更新完成后启动、卸载，以及无 SDK 环境运行。使用合成或测试账号，不在发布资产中放入个人账号。
-3. 将通过检查的源码提交并创建与构建一致的 tag。
-4. 在 [GitHub Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 创建该 tag 的 Release，上传安装包、SHA-256 文件和 `update-installed.json`。
-5. 检查清单中的 `download_url` 能下载到同一 Release 的安装包，下载后重新校验 SHA-256。
-6. 完成检查后将稳定版发布为 Latest。只有正式发布且可公开下载的 Release 才能供现有客户端检查到。
+1. 先在本地完成代码和文档修改，更新版本号、`CHANGELOG.md`、软件内新版本提示与 Release 说明。提交信息说明具体变化及验证结果。
+2. 在本地编译、打包并运行相应检查；界面变化还需查看实际截图。验证失败先修复，不先提交一个尚未验证的发布版本。
+3. 在隔离 Windows 用户或测试机验证首次安装、旧安装位置升级、账号与设置保留、更新完成后启动、卸载，以及无 SDK 环境运行。使用合成或测试账号，不在发布资产中放入个人账号。
+4. 本地检查通过后正常提交源码并运行 CI，保留 1.0.0 及后续 Git 提交和 tag 历史，不重建分支历史。CI 通过后，创建与已验证构建一致的 tag（本次为 `v1.0.1`），从该提交生成 `Star-Codex-Switcher-1.0.1-source.zip`。
+5. 在 [GitHub Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 创建该 tag 的草稿 Release，上传同一版本的安装包、源码包、SHA-256 文件和 `update-installed.json`。确认资产齐全、版本和哈希匹配，再准备公开；不要先更新清单，再补尚不可下载的安装包。
+6. 将资产齐全的草稿正式发布为 Latest，保留旧版下载直至下一步核验通过。
+7. 从公网重新下载新版安装包和清单，核对 `download_url`、版本、包哈希与内置应用哈希；确认软件能检测到新版，提示文案与本次改动一致。该步骤验证公开可下载性，不能用草稿上传成功代替。
+8. 新版公开下载及更新入口验证可用后，再移除旧 Release 的下载入口和资产；保留对应 Git 提交、tag 与更新记录。若新版核验失败，先修复或恢复可用入口，不先删除线上可用版本。
+
+本地打包交付目录与公开下载最终只保留最后一次验证通过的一组文件（安装包、源码包、校验文件和更新清单）。清理与发布属于实际操作，只有完成后才记录为已完成；本说明不表示旧文件已被清理。
 
 客户端固定读取：
 

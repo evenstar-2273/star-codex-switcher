@@ -31,14 +31,11 @@ public sealed class MainWindow : Window
     public int AccountColumnCount => LayoutWidth >= 1560 ? 3 : LayoutWidth >= 980 ? 2 : 1;
     private int LayoutKey => AccountColumnCount * 10 + (LayoutWidth < 720 ? 1 : 0);
     private AccountSnapshot State => client.State;
-    private bool Chinese => State.Settings.Language == "simplifiedChinese" ||
-        (State.Settings.Language == "system" && CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "zh");
+    private bool Chinese => WindowsLocalization.IsChinese(State.Settings.Language);
     private string L(string chinese, string english) => Chinese ? chinese : english;
     private string T(string key) {
         if (Chinese && key == "auto_reset") return "到期前自动使用重置机会";
         if (Chinese && key == "auto_reset_hint") return "重置机会到期前 10 分钟，自动使用所有已保存账号的可用重置次数；应用须运行且电脑保持唤醒。";
-        var value = State.Text(key);
-        if (value != key) return value;
         return key switch {
             "accounts" => L("账号", "Accounts"), "settings" => L("设置", "Settings"), "back" => L("返回", "Back"),
             "cancel" => L("取消", "Cancel"), "remove" => L("删除", "Delete"), "switch" => L("切换账号", "Switch account"),
@@ -58,7 +55,7 @@ public sealed class MainWindow : Window
             "automatically_check_updates" => L("自动检查更新", "Automatically check for updates"),
             "check_for_updates" => L("检查更新", "Check for updates"),
             "current_version" => L("当前版本：%@", "Current version: %@"),
-            _ => value
+            _ => State.Text(key)
         };
     }
 
@@ -66,7 +63,7 @@ public sealed class MainWindow : Window
     {
         this.client = client; this.native = native ?? new NativeSettings(); this.now = now ?? (() => DateTimeOffset.Now);
         Icon = System.Windows.Media.Imaging.BitmapFrame.Create(App.IconUri);
-        Title = "Star Codex Switcher";
+        Title = App.DisplayName;
         Width = Math.Min(1100, SystemParameters.WorkArea.Width - 24); Height = Math.Min(900, SystemParameters.WorkArea.Height - 24);
         MinWidth = 480; MinHeight = 440; SizeToContent = SizeToContent.Manual;
         WindowStyle = WindowStyle.SingleBorderWindow; ResizeMode = ResizeMode.CanResize; ShowInTaskbar = true;
@@ -144,7 +141,7 @@ public sealed class MainWindow : Window
         renderedLayout = LayoutKey;
         var body = new StackPanel { Margin = new Thickness(26, 0, 26, 24) };
         if (State.Error != null || localError != null) {
-            var message = Text(localError ?? State.Error!, 14); message.TextWrapping = TextWrapping.Wrap; message.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
+            var message = Text(WindowsLocalization.Error(localError ?? State.Error!, State.Settings.Language), 14); message.TextWrapping = TextWrapping.Wrap; message.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
             var dismiss = Button("", () => { localError = null; _ = Run("dismissError"); Render(); }, "\uE711"); AutomationProperties.SetName(dismiss, L("关闭错误提示", "Dismiss error"));
             var alert = Box(Pair(message, dismiss), "WarningSurface"); alert.Padding = new Thickness(14); alert.Margin = new Thickness(0, 16, 0, 0); body.Children.Add(alert);
         }
@@ -238,11 +235,11 @@ public sealed class MainWindow : Window
             quotas.Children.Add(UsageLine(L("7 天剩余", "7 days left"), usage.RemainingPercent, usage.ResetsAt, true));
             if (row.UsageError != null) {
                 var stale = Text(L("刷新未完成，显示上次额度", "Refresh failed; showing previous quota"), 12, muted: true);
-                stale.ToolTip = row.UsageError; stale.Margin = new Thickness(0, 4, 0, 0); quotas.Children.Add(stale);
+                stale.ToolTip = WindowsLocalization.Error(row.UsageError, State.Settings.Language); stale.Margin = new Thickness(0, 4, 0, 0); quotas.Children.Add(stale);
             }
         } else {
             var missing = Text(row.UsageStatus == "idle" ? L("额度读取中…", "Loading quota…") : T("usage_unavailable"), 15, muted: true);
-            missing.ToolTip = row.UsageError; missing.TextWrapping = TextWrapping.Wrap; quotas.Children.Add(missing);
+            missing.ToolTip = WindowsLocalization.Error(row.UsageError, State.Settings.Language); missing.TextWrapping = TextWrapping.Wrap; quotas.Children.Add(missing);
         }
         Grid.SetRow(quotas, 1); card.Children.Add(quotas);
         var metadata = new StackPanel(); metadata.Children.Add(Rule());
@@ -254,7 +251,7 @@ public sealed class MainWindow : Window
             var date = Text(expiredSnapshot ? L("有效期：待核验", "Expiry: verification needed") : L("有效期：", "Expires: ") + subscription.ActiveUntil.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), 14, muted: true);
             date.ToolTip = subscription.ActiveUntil.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + "\n" +
                 (subscription.IsVerified ? L("订阅查询时间：", "Subscription checked: ") : L("登录信息时间：", "Login snapshot time: ")) +
-                subscription.LastChecked.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + (row.SubscriptionError == null ? "" : "\n" + row.SubscriptionError);
+                subscription.LastChecked.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + (row.SubscriptionError == null ? "" : "\n" + WindowsLocalization.Error(row.SubscriptionError, State.Settings.Language));
             expiry.Children.Add(date);
             if (!expiredSnapshot) {
                 var remaining = Text(" · " + (needsVerification ? L("待核验", "Unverified") : AccountVisuals.ExpiryRemaining(subscription.ActiveUntil, now(), Chinese)), 14, bold: !needsVerification);
@@ -266,7 +263,7 @@ public sealed class MainWindow : Window
                 "stale" or "unavailable" => L("有效期：待核验", "Expiry: verification needed"),
                 _ => L("有效期：未知", "Expiry: unknown")
             }, 14, muted: true);
-            missing.ToolTip = row.SubscriptionError; expiry.Children.Add(missing);
+            missing.ToolTip = WindowsLocalization.Error(row.SubscriptionError, State.Settings.Language); expiry.Children.Add(missing);
         }
         metadata.Children.Add(expiry);
         var creditLine = new Grid { Margin = new Thickness(0, 8, 0, 10) };
@@ -431,7 +428,7 @@ public sealed class MainWindow : Window
         Row(automation, T("auto_reset"), "\uE777", Toggle(T("auto_reset"), State.Settings.AutoResetEnabled, value => _ = Run("autoReset", value: value)), T("auto_reset_hint"));
         var log = Button(T("open_reset_log"), () => {
             try {
-                var directory = Environment.GetEnvironmentVariable("CODEX_SWITCHER_DATA_HOME") ?? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Codex Account Switcher");
+                var directory = Environment.GetEnvironmentVariable("CODEX_SWITCHER_DATA_HOME") ?? App.DefaultDataDirectory;
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(directory) { UseShellExecute = true });
             } catch (Exception ex) { localError = ex.Message; Render(); }
         }, "\uE8B7"); log.HorizontalAlignment = HorizontalAlignment.Left; log.Margin = new Thickness(34, 0, 0, 4); automation.Children.Add(log);

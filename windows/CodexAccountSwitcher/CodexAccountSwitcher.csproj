@@ -4,7 +4,9 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>disable</ImplicitUsings>
-    <AssemblyName>Codex-Account-Switcher-windows-x64</AssemblyName>
+    <AssemblyName>Star-Codex-Switcher-windows-x64</AssemblyName>
+    <AssemblyTitle>Star Codex Switcher</AssemblyTitle>
+    <Product>Star Codex Switcher</Product>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <SwiftRuntimeArchive Condition="'$(SwiftRuntimeArchive)' == ''">../artifacts/SwiftRuntime.zip</SwiftRuntimeArchive>
   </PropertyGroup>

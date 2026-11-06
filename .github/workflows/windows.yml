@@ -59,7 +59,7 @@ jobs:
         shell: pwsh
         run: |
           $publish = (Get-Content -Raw ./windows/artifacts/latest-installed-build.txt).Trim()
-          $executable = Join-Path $publish 'Codex-Account-Switcher-windows-x64.exe'
+          $executable = Join-Path $publish 'Star-Codex-Switcher-windows-x64.exe'
           $start = [Diagnostics.ProcessStartInfo]::new($executable, '--self-test')
           $start.UseShellExecute = $false
           $start.CreateNoWindow = $true

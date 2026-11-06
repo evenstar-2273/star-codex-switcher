@@ -22,7 +22,7 @@
 ## 安装与使用
 
 1. 安装并运行过 Codex Desktop，确认本机能够连接其服务。
-2. 在 [Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 下载文件名包含 `Setup-x64.exe` 的安装包并运行。它是安装程序，不能把它直接覆盖到旧版程序上。
+2. 在 [Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 下载对应版本的安装包，例如 `Star-Codex-Switcher-1.0.1-Setup-x64.exe`，双击安装。它是安装程序，不能把它直接覆盖到旧版程序上。
 3. 打开工具，保存当前账号或导入账号 JSON。切换前先完成或停止 Codex Desktop 内正在运行的任务。
 4. 点击账号的“切换”，核对二次确认提示后继续。切换流程可能关闭并重启 Codex Desktop。
 
@@ -30,9 +30,11 @@
 
 历史便携版的 EXE 可直接运行，安装版则会建立固定安装目录、快捷方式和卸载入口。今后的常规分发与自动更新以安装版为主。
 
+从 1.0.1 起，窗口标题、快捷方式和安装显示名称统一为 `Star Codex Switcher`，主程序为 `StarCodexSwitcher.exe`。新用户默认安装到 `%LOCALAPPDATA%\Programs\Star Codex Switcher`，也可在安装时选择路径；旧用户升级沿用已有安装位置。需要源码时下载 `Star-Codex-Switcher-1.0.1-source.zip`，它不是安装包。
+
 ## 账号数据与导入
 
-账号数据保存在当前 Windows 用户的数据目录，通常是 `%LOCALAPPDATA%\Codex Account Switcher`，与安装目录分开。升级不会把发布者的账号带入安装包，也不应删除已有账号。卸载后重装或换电脑前，仍建议自行备份账号数据。
+账号数据保存在当前 Windows 用户的数据目录，通常是 `%LOCALAPPDATA%\Codex Account Switcher`，与安装目录分开。为兼容已有数据，重命名不会迁移这个目录；升级保留已导入账号、登录记录和已有设置。安装包不包含发布者账号。卸载后重装或换电脑前，仍建议自行备份账号数据。
 
 导入支持单个账号、账号数组及 `{"accounts": [...]}` 包装形式。需要真实完整的登录字段；含 `***` 的脱敏预览无法用于登录。不要把账号 JSON、`auth.json`、访问令牌或刷新令牌提交到仓库、Issue 或公开截图中。具体支持范围与失败处理见 [实现说明](GUARDED-README.md)。
 
@@ -48,7 +50,7 @@
 
 安装版从本仓库最新 Release 中的 `update-installed.json` 读取版本信息，下载对应版本的安装包并校验 SHA-256。用户确认更新后，工具交接给安装程序，更新完成后重新启动。更新本工具不等于更新 Codex Desktop。
 
-更新源固定为本仓库，不在设置页提供自定义服务器地址。发布版本时必须同时上传安装包、校验文件和更新清单，详见 [发布文档](docs/windows-build-release.md)。
+更新源固定为本仓库，不在设置页提供自定义服务器地址。软件内新版本提示、[更新记录](CHANGELOG.md) 和 Release 说明对应同一版本。发布时同步上传安装包、源码包、校验文件与更新清单，详见 [发布文档](docs/windows-build-release.md)。
 
 ## 开发文档
 

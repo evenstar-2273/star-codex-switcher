@@ -49,6 +49,8 @@ Host 的切换结果本身不能证明 Codex Desktop 已完成在线登录。应
 - 活动 Codex 目录遵循 `CODEX_HOME`，否则使用当前用户的 `.codex`。
 - 工具数据默认保存在 `%LOCALAPPDATA%\Codex Account Switcher`。
 - 安装版使用 NSIS 当前用户安装；程序与账号数据目录分开。升级安装不删除账号数据。
+- 从 1.0.1 起，显示标题和快捷方式统一为 `Star Codex Switcher`，应用文件为 `StarCodexSwitcher.exe`。旧用户升级沿用已登记的安装位置；新用户默认位置为 `%LOCALAPPDATA%\Programs\Star Codex Switcher`，可在安装时选择其它路径。
+- 重命名保留既有账号数据目录和设置存储，已有账号、登录记录、主题及其它偏好继续使用；显示名称改变不意味着清空或重新建立账号库。
 - 运行时随包附带，不需要目标机器预装 .NET SDK 或 Swift 工具链。
 - 新电脑需要自行登录或导入账号，不复制开发者账号。
 - 访问官方服务遵循系统代理配置，不关闭 TLS 校验。

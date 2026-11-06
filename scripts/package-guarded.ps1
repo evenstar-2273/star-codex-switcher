@@ -29,9 +29,12 @@ $publish = Join-Path $stage 'publish'
     -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false `
     "-p:SwiftRuntimeArchive=$archive" --nologo
 if ($LASTEXITCODE -ne 0) { throw 'Guarded build failed' }
-$name = 'Codex-Account-Switcher-0.1.27-guarded.3-win-x64.exe'
+$app = Join-Path $publish 'Star-Codex-Switcher-windows-x64.exe'
+$version = [Version]::Parse((Get-Item -LiteralPath $app).VersionInfo.FileVersion)
+$releaseVersion = if ($version.Revision -eq 0) { $version.ToString(3) } else { $version.ToString() }
+$name = "Star-Codex-Switcher-$releaseVersion-Portable-x64.exe"
 $destination = Join-Path $artifactRoot $name
-Copy-Item -LiteralPath (Join-Path $publish 'Codex-Account-Switcher-windows-x64.exe') -Destination $destination -Force
+Copy-Item -LiteralPath $app -Destination $destination -Force
 $hash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($destination + '.sha256', "$hash  $name`n", [Text.UTF8Encoding]::new($false))
 # Keep private build intermediates under the source tree, never in the deliverables folder.

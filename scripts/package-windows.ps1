@@ -43,7 +43,7 @@ try {
         -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false `
         "-p:SwiftRuntimeArchive=$runtimeZip" --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Windows publish failed.' }
-    $filename = 'Codex-Account-Switcher-windows-x64.exe'
+    $filename = 'Star-Codex-Switcher-windows-x64.exe'
     $builtExe = Join-Path $staging $filename
     if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) { throw 'Published EXE is missing.' }
     $expectedVersion = ([xml](Get-Content -Raw (Join-Path $windowsRoot 'Directory.Build.props'))).Project.PropertyGroup.Version

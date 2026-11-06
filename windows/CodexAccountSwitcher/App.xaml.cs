@@ -18,7 +18,11 @@ namespace CodexAccountSwitcher;
 
 public partial class App : Application
 {
-    public static Uri IconUri { get; } = new("pack://application:,,,/Codex-Account-Switcher-windows-x64;component/app.ico");
+    public const string DisplayName = "Star Codex Switcher";
+    // Keep the existing storage identity when changing the display and executable names.
+    public static string DefaultDataDirectory => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Codex Account Switcher");
+    public static Uri ResourceUri(string name) => new($"pack://application:,,,/{typeof(App).Assembly.GetName().Name};component/{name}");
+    public static Uri IconUri { get; } = ResourceUri("app.ico");
     private readonly bool startRuntime;
     public App() : this(true) { }
     public App(bool startRuntime) { this.startRuntime = startRuntime; }
@@ -50,13 +54,20 @@ public partial class App : Application
         if (!startRuntime) return;
         if (e.Args.Length == 2 && e.Args[0] == "--apply-update") {
             try { await UpdateInstaller.RunHelperAsync(e.Args[1]); Shutdown(); }
-            catch (Exception ex) { MessageBox.Show("更新未完成。" + ex.Message, "Codex Account Switcher 更新", MessageBoxButton.OK, MessageBoxImage.Error); Shutdown(1); }
+            catch (Exception ex) { MessageBox.Show("更新未完成。" + ex.Message, DisplayName + " 更新", MessageBoxButton.OK, MessageBoxImage.Error); Shutdown(1); }
             return;
         }
+        if (e.Args.Length == 3 && e.Args[0] == "--cleanup-install-shortcuts") {
+            try { InstalledMigration.CleanupShortcuts(Environment.ProcessPath!, e.Args[1], e.Args[2]); Shutdown(); }
+            catch { Shutdown(1); }
+            return;
+        }
+        try { if (await UpdateInstaller.RedirectLegacyLaunchAsync(e.Args)) { Shutdown(); return; } }
+        catch { Shutdown(1); return; }
         if (e.Args.Contains("--self-test")) { await SelfTestAsync(); return; }
         try {
             var dataPath = Environment.GetEnvironmentVariable("CODEX_SWITCHER_DATA_HOME")
-                ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Codex Account Switcher");
+                ?? DefaultDataDirectory;
             var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(dataPath).ToUpperInvariant())));
             if (e.Args.Contains("--prepare-install")) {
                 // Installer may ask the running switcher to exit, but never interrupts account work.
@@ -89,16 +100,16 @@ public partial class App : Application
             activationListener = ThreadPool.RegisterWaitForSingleObject(activateWindow, (_, _) =>
                 Dispatcher.BeginInvoke(new Action(() => { if (!exiting) { ApplyTheme(); window.OpenWindow(); } })),
                 null, Timeout.Infinite, false);
-            tray = new Forms.NotifyIcon { Text = "Codex Account Switcher" };
+            tray = new Forms.NotifyIcon { Text = DisplayName };
             RefreshTrayIcon();
             tray.Visible = true;
             trayMenu = new Forms.ContextMenuStrip();
-            var openItem = new Forms.ToolStripMenuItem("Codex Account Switcher");
+            var openItem = new Forms.ToolStripMenuItem(DisplayName);
             openItem.Click += (_, _) => { ApplyTheme(); window.OpenWindow(); };
             var quitItem = new Forms.ToolStripMenuItem();
             quitItem.Click += (_, _) => _ = QuitAsync();
             trayMenu.Items.Add(openItem); trayMenu.Items.Add(new Forms.ToolStripSeparator()); trayMenu.Items.Add(quitItem);
-            trayMenu.Opening += (_, _) => { quitItem.Text = client.State.Text("quit"); quitItem.Enabled = !window.IsBusy; };
+            trayMenu.Opening += (_, _) => { quitItem.Text = WindowsLocalization.IsChinese(client.State.Settings.Language) ? "退出应用" : "Quit"; quitItem.Enabled = !window.IsBusy; };
             tray.ContextMenuStrip = trayMenu;
             tray.MouseClick += (_, args) => {
                 if (args.Button == Forms.MouseButtons.Left) { ApplyTheme(); window.OpenWindow(); }
@@ -106,13 +117,13 @@ public partial class App : Application
             client.Changed += RefreshTray;
             await client.InitializeAsync();
             if (!e.Args.Contains("--background")) window.OpenWindow();
-            UpdateInstaller.SignalReady(e.Args);
+            await UpdateInstaller.SignalReadyAsync(e.Args);
             updates = new DispatcherTimer { Interval = TimeSpan.FromHours(1) };
             updates.Tick += async (_, _) => { if (native.AutomaticallyCheckUpdates && native.HasUpdateServer) await native.CheckUpdatesAsync(); };
             updates.Start();
             if (native.AutomaticallyCheckUpdates && native.HasUpdateServer) _ = native.CheckUpdatesAsync();
         } catch (Exception ex) {
-            MessageBox.Show(ex.Message, "Codex Account Switcher", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(ex.Message, DisplayName, MessageBoxButton.OK, MessageBoxImage.Error);
             await QuitAsync();
         }
     }
@@ -123,7 +134,7 @@ public partial class App : Application
         RefreshTrayIcon();
         var active = client.State.Accounts.FirstOrDefault(row => row.Profile.Id == client.State.ActiveAccountID);
         var percent = ActiveTrayPercent();
-        var label = active == null ? "Codex Account Switcher" : active.Profile.DisplayName + (percent != null ? " · " + percent + "%" : "");
+        var label = active == null ? DisplayName : active.Profile.DisplayName + (percent != null ? " · " + percent + "%" : "");
         tray.Text = label.Length > 63 ? label[..63] : label;
     }
     private int? ActiveTrayPercent()
@@ -149,7 +160,7 @@ public partial class App : Application
         if (percent is { } value) {
             replacement = TrayUsageIcon.Create(value, variant == "light", size);
         } else {
-            var uri = new Uri($"pack://application:,,,/Codex-Account-Switcher-windows-x64;component/tray-{variant}.ico");
+            var uri = ResourceUri($"tray-{variant}.ico");
             using var resource = GetResourceStream(uri).Stream;
             using var original = new Icon(resource, size);
             replacement = (Icon)original.Clone();
@@ -264,7 +275,7 @@ public partial class App : Application
         } catch (Exception ex) { result = "FAIL: " + ex; exitCode = 1; }
         finally { if (Directory.Exists(root)) SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root); }
         if (Environment.GetEnvironmentVariable("CODEX_SWITCHER_SELF_TEST_RESULT") is { } output) File.WriteAllText(output, result);
-        if (exitCode == 0) UpdateInstaller.SignalReady(Environment.GetCommandLineArgs());
+        if (exitCode == 0) await UpdateInstaller.SignalReadyAsync(Environment.GetCommandLineArgs());
         Shutdown(exitCode);
     }
     protected override void OnExit(ExitEventArgs e) {

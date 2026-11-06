@@ -57,6 +57,34 @@ await UpdateInstaller.ApplyInstalledAsync(job, path => UpdateInstaller.LaunchAnd
 await Task.Delay(500);
 Check(UpdateInstaller.Hash(target) == appHash, "Final upgraded executable restored for uninstall checks.");
 Check(File.ReadAllText(sentinel) == marker, "All paths preserve account data.");
+// A new helper can also update a legacy-named installation transactionally.
+var legacy = Path.Combine(Path.GetDirectoryName(target)!, Distribution.LegacyExecutableName);
+File.Delete(target); File.Copy(previous, legacy);
+using (var key = Registry.CurrentUser.OpenSubKey(registryKey, writable: true)!) {
+    key.SetValue("DisplayVersion", oldVersion);
+    key.SetValue("DisplayName", Distribution.LegacyDisplayName);
+    key.SetValue("DisplayIcon", legacy);
+}
+var uninstaller = Path.Combine(Path.GetDirectoryName(target)!, "Uninstall.exe");
+var uninstallHash = UpdateInstaller.Hash(uninstaller);
+var renamedJob = job with { Target = legacy };
+failed = false;
+try { await UpdateInstaller.ApplyInstalledAsync(renamedJob, _ => throw new IOException("simulated legacy migration startup failure"), registryKey); }
+catch (IOException) { failed = true; }
+Check(failed && !File.Exists(target) && UpdateInstaller.Hash(legacy) == oldHash, "Legacy migration startup failure restores only the original filename.");
+Check(UpdateInstaller.Hash(uninstaller) == uninstallHash, "Legacy migration rollback restores uninstaller.");
+using (var key = Registry.CurrentUser.OpenSubKey(registryKey)!) {
+    Check((string?)key.GetValue("DisplayName") == Distribution.LegacyDisplayName && (string?)key.GetValue("DisplayIcon") == legacy &&
+        (string?)key.GetValue("DisplayVersion") == oldVersion, "Legacy migration rollback preserves all visible registration fields.");
+}
+Check(!File.Exists(Path.Combine(Path.GetDirectoryName(target)!, ".star-migration.ini")), "Rollback removes its migration marker.");
+await UpdateInstaller.ApplyInstalledAsync(renamedJob, path => UpdateInstaller.LaunchAndVerifyAsync(path, selfTest: true), registryKey);
+for (var attempt = 0; attempt < 100 && File.Exists(legacy); attempt++) await Task.Delay(100);
+Check(UpdateInstaller.Hash(target) == appHash && !File.Exists(legacy), "Ready migration runs the new filename and removes the temporary alias.");
+using (var key = Registry.CurrentUser.OpenSubKey(registryKey)!) {
+    Check((string?)key.GetValue("DisplayName") == Distribution.DisplayName && (string?)key.GetValue("DisplayIcon") == target, "Ready migration registers the new product and executable.");
+}
+Check(File.ReadAllText(sentinel) == marker, "Renamed migration preserves account data.");
 Console.WriteLine($"PASS: installed updater {oldVersion} -> {version}; NSIS invocation, application checksum, restart readiness, startup rollback, invalid hash, concurrent initial and post-install modifications, preserved account data.");
 return 0;
 string? RegisteredVersion() { using var key = Registry.CurrentUser.OpenSubKey(registryKey); return key?.GetValue("DisplayVersion") as string; }

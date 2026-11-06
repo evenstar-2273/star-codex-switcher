@@ -2,7 +2,7 @@ param([Parameter(Mandatory=$true)][string]$Executable, [Parameter(Mandatory=$tru
 $ErrorActionPreference = 'Stop'
 $testRoot = [IO.Path]::GetFullPath($TestDirectory)
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
-$copy = Join-Path $testRoot '账号切换器.exe'
+$copy = Join-Path $testRoot 'Star-Codex-Switcher.exe'
 Copy-Item -LiteralPath $Executable -Destination $copy -Force
 $resultPath = Join-Path $testRoot 'self-test.txt'
 $start = [Diagnostics.ProcessStartInfo]::new($copy, '--self-test')

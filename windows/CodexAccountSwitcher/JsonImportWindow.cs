@@ -12,7 +12,7 @@ public sealed class JsonImportWindow : Window
     private bool importing;
     public JsonImportWindow(IAccountImporter importer)
     {
-        Title = "导入账号 · Star Codex Switcher";
+        Title = "导入账号 · " + App.DisplayName;
         Icon = System.Windows.Media.Imaging.BitmapFrame.Create(App.IconUri);
         Width = Math.Min(820, SystemParameters.WorkArea.Width - 24);
         Height = Math.Min(620, SystemParameters.WorkArea.Height - 24);
