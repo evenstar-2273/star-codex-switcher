@@ -12,10 +12,10 @@
   <SolidColorBrush x:Key="Schedule" Color="#344B6A"/>
   <SolidColorBrush x:Key="Line" Color="#CBD7E8"/>
   <SolidColorBrush x:Key="Track" Color="#D6DFEB"/>
-  <LinearGradientBrush x:Key="Accent" StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#1457C5" Offset="0"/><GradientStop Color="#08739E" Offset="1"/></LinearGradientBrush>
-  <LinearGradientBrush x:Key="AccentBorder" StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#1457C5" Offset="0"/><GradientStop Color="#08739E" Offset="1"/></LinearGradientBrush>
-  <SolidColorBrush x:Key="AccentInk" Color="#135FBE"/>
-  <LinearGradientBrush x:Key="Selected" StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#ECF4FC" Offset="0"/><GradientStop Color="#F6FAFD" Offset="1"/></LinearGradientBrush>
+  <LinearGradientBrush x:Key="Accent" StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#7040CE" Offset="0"/><GradientStop Color="#963C9D" Offset="1"/></LinearGradientBrush>
+  <LinearGradientBrush x:Key="AccentBorder" StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#7040CE" Offset="0"/><GradientStop Color="#963C9D" Offset="1"/></LinearGradientBrush>
+  <SolidColorBrush x:Key="AccentInk" Color="#6D35B1"/>
+  <LinearGradientBrush x:Key="Selected" StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#F3F2FC" Offset="0"/><GradientStop Color="#F9F9FD" Offset="1"/></LinearGradientBrush>
   <SolidColorBrush x:Key="Hover" Color="#E2ECFA"/>
   <SolidColorBrush x:Key="Success" Color="#138A3F"/>
   <SolidColorBrush x:Key="Warning" Color="#9B5C00"/>

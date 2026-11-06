@@ -16,13 +16,16 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
     private readonly Task reader;
     private readonly Task stderr;
     private readonly IDesktopOperations desktop;
+    private readonly Func<Uri, CancellationToken, Task> openBrowser;
     private int nextID;
     public AccountSnapshot State { get; private set; } = AccountSnapshot.Empty;
     public event Action? Changed;
 
-    public CoreClient(string hostPath, string dataPath, string? activeHome = null, IDesktopOperations? desktop = null)
+    public CoreClient(string hostPath, string dataPath, string? activeHome = null, IDesktopOperations? desktop = null,
+        Func<Uri, CancellationToken, Task>? openBrowser = null)
     {
         this.desktop = desktop ?? new DesktopController(ct => DesktopController.DiscoverAsync(null, ct));
+        this.openBrowser = openBrowser ?? OpenBrowserAsync;
         context = SynchronizationContext.Current ?? new SynchronizationContext();
         var start = new ProcessStartInfo(hostPath) {
             UseShellExecute = false, CreateNoWindow = true,
@@ -88,7 +91,10 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
                         }
                         break;
                     case "platform":
-                        _ = HandlePlatformAsync(message.Clone());
+                        // Shell launch may block inside Windows. It must never block reading
+                        // cancellation acknowledgements and updated account snapshots.
+                        var operation = message.Clone();
+                        _ = Task.Run(() => HandlePlatformAsync(operation));
                         break;
                     case "protocolError": throw new IOException("The shared core protocol failed.");
                 }
@@ -109,7 +115,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
                 case "openBrowser":
                     var url = new Uri(message.GetProperty("url").GetString()!);
                     if (url.Scheme is not ("https" or "http")) throw new IOException("Invalid sign-in address.");
-                    using (Process.Start(new ProcessStartInfo(url.AbsoluteUri) { UseShellExecute = true })) { }
+                    await openBrowser(url, lifetime.Token);
                     break;
                 case "closeDesktop":
                     await desktop.CloseAsync(lifetime.Token);
@@ -124,11 +130,22 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
         catch (Exception) when (lifetime.IsCancellationRequested || process.HasExited) { }
     }
 
+    private static Task OpenBrowserAsync(Uri url, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        using (Process.Start(new ProcessStartInfo(url.AbsoluteUri) { UseShellExecute = true })) { }
+        return Task.CompletedTask;
+    }
+
     public async ValueTask DisposeAsync()
     {
-        process.StandardInput.Close();
+        try { process.StandardInput.Close(); }
+        catch (IOException) when (process.HasExited) { }
         try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
-        catch (TimeoutException) { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+        catch (TimeoutException) {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync(); // A replacement host may start only after this owned tree stops.
+        }
         lifetime.Cancel();
         try { await Task.WhenAll(reader, stderr); } catch (OperationCanceledException) { }
         process.Dispose(); lifetime.Dispose(); writeLock.Dispose();

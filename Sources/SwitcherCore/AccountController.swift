@@ -233,14 +233,23 @@ open class AccountController {
         isAddingAccount = true
         addAccountTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                self.isAddingAccount = false
+                self.addAccountTask = nil
+            }
             await self.performAddAccount()
-            self.isAddingAccount = false
-            self.addAccountTask = nil
         }
     }
 
     public func cancelAddingAccount() {
         addAccountTask?.cancel()
+    }
+
+    public func cancelAddingAccountAndWait() async {
+        let task = addAccountTask
+        task?.cancel()
+        // A new login is allowed only after the old task has cleaned its temporary profile.
+        await task?.value
     }
 
     private func performAddAccount() async {

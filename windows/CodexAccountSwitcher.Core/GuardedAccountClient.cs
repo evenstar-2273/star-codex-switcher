@@ -16,9 +16,13 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private readonly IDesktopOperations desktop;
     private readonly ILoginValidator validator;
     private readonly SemaphoreSlim commands = new(1);
+    private volatile string? activeCommand;
+    private readonly SemaphoreSlim loginCancellation = new(1);
+    private TimeSpan loginCancellationTimeout = TimeSpan.FromSeconds(3);
     private IAccountRuntime? core;
     private GuardedSwitch? transaction;
     private bool busy;
+    private bool cancellingLogin;
     private string? error;
     private readonly bool directUsageEnabled;
     private readonly CancellationTokenSource usageLifetime = new();
@@ -37,7 +41,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         get {
             var state = initialized && core != null ? core.State : pausedState;
             return state with {
-                IsMutating = busy || state.IsMutating, Error = error ?? state.Error,
+                IsMutating = busy || cancellingLogin || state.IsMutating, Error = error ?? state.Error,
                 Accounts = state.Accounts.Select(row => {
                     var current = directUsage.TryGetValue(row.Profile.Id, out var entry)
                         ? row with { Usage = entry.Usage ?? row.Usage, UsageError = entry.Error, UsageStatus = entry.Usage != null ? "loaded" : row.Usage != null ? row.UsageStatus : "unavailable" }
@@ -63,7 +67,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private void Notify() {
         DetectChangedCredentials();
         Changed?.Invoke();
-        if (!directUsageEnabled || usageLifetime.IsCancellationRequested || busy || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount) return;
+        if (!directUsageEnabled || usageLifetime.IsCancellationRequested || busy || cancellingLogin || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount) return;
         foreach (var row in core.State.Accounts) {
             var id = row.Profile.Id;
             if (resetNeedsRefresh.ContainsKey(id)) continue;
@@ -207,9 +211,12 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
 
     internal GuardedAccountClient(string dataPath, string activeHome, Func<IAccountRuntime> runtimeFactory,
         IResetCreditService resetCredits, Func<LoginCredential, CancellationToken, Task<Usage>> usageReader, ILoginValidator validator,
-        ISubscriptionReader? subscriptionReader = null)
+        ISubscriptionReader? subscriptionReader = null, TimeSpan? loginCancellationTimeout = null)
         : this("", dataPath, activeHome, validator: validator, resetCredits: resetCredits, usageReader: usageReader, subscriptionReader: subscriptionReader ?? new EmptySubscriptionReader())
-        => this.runtimeFactory = runtimeFactory;
+    {
+        this.runtimeFactory = runtimeFactory;
+        if (loginCancellationTimeout is { } timeout) this.loginCancellationTimeout = timeout;
+    }
 
     public async Task InitializeAsync()
     {
@@ -263,7 +270,12 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
 
     public async Task CommandAsync(string command, Guid? accountID = null, bool? value = null, string? language = null)
     {
+        // Cancellation must reach the login even when its start acknowledgement
+        // or another ordinary command is still waiting on the shared transport.
+        if (command == "cancelAdd") { await CancelAddingAccountAsync(); return; }
+        if (cancellingLogin) return;
         if (!await commands.WaitAsync(0)) return;
+        activeCommand = command;
         try {
             if (core == null) throw new IOException("Account core is unavailable. Restart the app.");
             if (command == "dismissError") error = null;
@@ -281,7 +293,8 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             }
             if (command != "switch") {
                 if (command == "refresh") foreach (var entry in directUsage.Where(x => x.Value.Usage == null).ToArray()) directUsage.TryRemove(entry.Key, out _);
-                await core.CommandAsync(command, accountID, value, language);
+                try { await core.CommandAsync(command, accountID, value, language); }
+                catch when (command == "add" && cancellingLogin) { return; }
                 if (command == "remove" && accountID is { } removed) { AdvanceUsageGeneration(); directUsage.TryRemove(removed, out _); planHints.TryRemove(removed, out _); credentialFingerprints.TryRemove(removed, out _); resetNeedsRefresh.TryRemove(removed, out _); subscriptions.TryRemove(removed, out _); }
                 return;
             }
@@ -306,8 +319,39 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
                 }
             } else if (transportError != null) { throw transportError; }
         } finally {
-            transaction?.Dispose(); transaction = null; busy = false; commands.Release(); Notify();
+            transaction?.Dispose(); transaction = null; busy = false; activeCommand = null; commands.Release(); Notify();
         }
+    }
+
+    private async Task CancelAddingAccountAsync()
+    {
+        if (!await loginCancellation.WaitAsync(0)) return;
+        try {
+            var runtime = core;
+            if (runtime == null || !initialized || (!runtime.State.IsAddingAccount && activeCommand != "add")) return;
+            cancellingLogin = true; error = null; Notify();
+            try {
+                // A command acknowledgement alone is insufficient: cleanup must
+                // have published the end of the login before controls are enabled.
+                using var timeout = new CancellationTokenSource(loginCancellationTimeout);
+                // A just-sent add may not have published its first snapshot yet.
+                // Wait for that start, or stop the owned host if the start itself hangs.
+                while (!runtime.State.IsAddingAccount && activeCommand == "add") await Task.Delay(20, timeout.Token);
+                if (!runtime.State.IsAddingAccount) return;
+                await runtime.CommandAsync("cancelAdd").WaitAsync(timeout.Token);
+                while (runtime.State.IsAddingAccount || activeCommand == "add") await Task.Delay(20, timeout.Token);
+            } catch {
+                // A damaged/older host must not strand the UI. Stop only the owned
+                // host tree, then reread its registry. Never write the live login.
+                if (core != runtime) return;
+                await StopCoreAsync();
+                pausedState = pausedState with { IsAddingAccount = false, IsMutating = false };
+                await commands.WaitAsync();
+                try { if (!usageLifetime.IsCancellationRequested) await InitializeAsync(); }
+                catch { error = "登录等待已停止，账号服务暂未恢复。请重新打开工具；已有账号和当前登录未被删除。"; }
+                finally { commands.Release(); }
+            }
+        } finally { cancellingLogin = false; loginCancellation.Release(); Notify(); }
     }
 
     public Task<ImportResult> ImportFilesAsync(string[] paths) => ImportAsync(() => AccountImport.ParseFiles(paths));
@@ -334,12 +378,18 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         ?? Task.FromException(new IOException("A validated switch is required."));
     public async ValueTask DisposeAsync() {
         usageLifetime.Cancel(); await Task.WhenAll(usageTasks.Values.ToArray());
-        await commands.WaitAsync();
-        try { await StopCoreAsync(); }
-        finally { commands.Release(); }
+        // A pending add can own commands until the host stops. Cancel it first;
+        // taking that gate before stopping the login would deadlock shutdown.
+        await CancelAddingAccountAsync();
+        await loginCancellation.WaitAsync();
+        try {
+            await commands.WaitAsync();
+            try { await StopCoreAsync(); }
+            finally { commands.Release(); }
+        } finally { loginCancellation.Release(); }
         (validator as IDisposable)?.Dispose(); if (ownsResetCredits) (resetCredits as IDisposable)?.Dispose();
         if (ownsSubscriptionReader) (subscriptionReader as IDisposable)?.Dispose();
-        commands.Dispose(); usageReads.Dispose(); usageLifetime.Dispose();
+        commands.Dispose(); loginCancellation.Dispose(); usageReads.Dispose(); usageLifetime.Dispose();
     }
     private sealed class HostedRuntime(CoreClient client) : IAccountRuntime {
         public AccountSnapshot State => client.State;

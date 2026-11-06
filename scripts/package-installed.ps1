@@ -35,7 +35,7 @@ $setup=Join-Path $OutputDirectory ("Star-Codex-Switcher-$releaseVersion-Setup-x6
 if($LASTEXITCODE -ne 0){throw 'NSIS build failed'}
 $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($setup+'.sha256',"$hash  $([IO.Path]::GetFileName($setup))`n",[Text.UTF8Encoding]::new($false))
-$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：统一 Star Codex Switcher 产品、程序及安装包名称；修复中文系统界面混用英文和登录错误未翻译；兼容旧版自动升级与启动失败回滚；保留账号、登录数据和快捷方式选择。"}
+$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：添加账号可选择浏览器授权或 JSON 导入；修复取消登录后操作未恢复、设置修改跳回顶部的问题；账号卡片按窗口宽度动态排列多列；恢复时间后增加括号剩余倒计时；默认暮光紫，保留已保存的主题色、账号和设置。"}
 [IO.File]::WriteAllText((Join-Path $OutputDirectory 'update-installed.json'),($feed|ConvertTo-Json)+"`n",[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $projectRoot 'windows\artifacts\latest-installed-build.txt'),$publish)
 Write-Output $setup

@@ -24,6 +24,17 @@ internal static class RpcFixture
             if (method == "account/login/start" && scenario == "login") {
                 await Console.Out.WriteLineAsync(JsonSerializer.Serialize(new { method = "account/login/completed", @params = new { success = true } }));
             }
+            if (method == "account/login/start" && Environment.GetEnvironmentVariable("SWITCHER_LOGIN_FIXTURE_ROOT") is { } fixtureRoot) {
+                await File.WriteAllTextAsync(Path.Combine(fixtureRoot, "login-session-" + Environment.ProcessId + ".json"),
+                    JsonSerializer.Serialize(new { pid = Environment.ProcessId, home }));
+                // A cancelled owned process must stop before this simulated late browser callback can write anything.
+                _ = Task.Run(async () => {
+                    while (!File.Exists(Path.Combine(fixtureRoot, "complete-" + Environment.ProcessId))) await Task.Delay(20);
+                    await File.WriteAllBytesAsync(Path.Combine(home, "auth.json"), GuardedChecks.Credential("late-cancelled-login").Bytes);
+                    await Console.Out.WriteLineAsync(JsonSerializer.Serialize(new { method = "account/login/completed", @params = new { success = true } }));
+                    await Console.Out.FlushAsync();
+                });
+            }
             await Console.Out.WriteLineAsync(JsonSerializer.Serialize(new { id = id.GetInt32(), result }));
             await Console.Out.FlushAsync();
         }

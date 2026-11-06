@@ -19,17 +19,23 @@ public sealed class MainWindow : Window
     private readonly NativeSettings native;
     private readonly Func<DateTimeOffset> now;
     private readonly DispatcherTimer presentationTimer;
+    private readonly ScrollViewer scroll = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
     private string page = "accounts";
+    private string? renderedPage;
+    private AccountSnapshot? renderedState;
+    private double? pendingScrollOffset;
+    private long renderGeneration;
     private AccountRow? target;
     private string? localError;
     private string confirmationReturnPage = "accounts";
     private int renderedLayout;
+    private AdaptiveCardGrid? accountGrid;
     private bool layoutPending, closingForExit;
     public bool IsBusy => client.State.IsMutating || native.IsInstalling;
     public string CurrentPage => page;
     private double LayoutWidth => ActualWidth > 0 ? ActualWidth : Width;
-    public int AccountColumnCount => LayoutWidth >= 1560 ? 3 : LayoutWidth >= 980 ? 2 : 1;
-    private int LayoutKey => AccountColumnCount * 10 + (LayoutWidth < 720 ? 1 : 0);
+    public int AccountColumnCount => accountGrid?.Columns ?? 1;
+    private int LayoutKey => LayoutWidth < 720 ? 1 : 0;
     private AccountSnapshot State => client.State;
     private bool Chinese => WindowsLocalization.IsChinese(State.Settings.Language);
     private string L(string chinese, string english) => Chinese ? chinese : english;
@@ -68,7 +74,8 @@ public sealed class MainWindow : Window
         MinWidth = 480; MinHeight = 440; SizeToContent = SizeToContent.Manual;
         WindowStyle = WindowStyle.SingleBorderWindow; ResizeMode = ResizeMode.CanResize; ShowInTaskbar = true;
         SetResourceReference(BackgroundProperty, "Surface"); WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        if (Application.Current is App application) { application.UseThemeSettings(this.native); application.PaletteChanged += Render; }
+        scroll.SetResourceReference(BackgroundProperty, "Surface"); Content = scroll;
+        if (Application.Current is App application) application.UseThemeSettings(this.native);
         SizeChanged += (_, _) => {
             if (LayoutKey == renderedLayout || layoutPending) return;
             layoutPending = true;
@@ -76,12 +83,11 @@ public sealed class MainWindow : Window
         };
         presentationTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
         presentationTimer.Tick += (_, _) => { if (IsVisible && page == "accounts" && !IsBusy) Render(); }; presentationTimer.Start();
-        client.Changed += Render; this.native.Changed += Render;
+        client.Changed += OnClientChanged; this.native.Changed += Render;
         PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape && !IsBusy && page != "accounts") { Navigate("accounts"); e.Handled = true; } };
         Closing += (_, e) => { if (!closingForExit) { e.Cancel = true; Hide(); } };
         Closed += (_, _) => {
-            presentationTimer.Stop(); client.Changed -= Render; this.native.Changed -= Render;
-            if (Application.Current is App application) application.PaletteChanged -= Render;
+            presentationTimer.Stop(); client.Changed -= OnClientChanged; this.native.Changed -= Render;
         };
         Render();
     }
@@ -130,6 +136,13 @@ public sealed class MainWindow : Window
         if (IsBusy || State.IsAddingAccount) return;
         confirmationReturnPage = "accounts"; target = row; page = destination; Render();
     }
+    private void OnClientChanged()
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(OnClientChanged)); return; }
+        if (page == "settings" && renderedState is { } previous && previous.Settings == State.Settings &&
+            previous.IsMutating == State.IsMutating && previous.IsAddingAccount == State.IsAddingAccount && previous.Error == State.Error) return;
+        Render();
+    }
 
     private void Render()
     {
@@ -138,6 +151,9 @@ public sealed class MainWindow : Window
             target = State.Accounts.FirstOrDefault(row => row.Profile.Id == target.Profile.Id);
             if (target == null) page = "accounts";
         }
+        var offset = renderedPage == page ? pendingScrollOffset ?? scroll.VerticalOffset : 0;
+        pendingScrollOffset = offset; renderedPage = page; renderedState = State;
+        var generation = ++renderGeneration;
         renderedLayout = LayoutKey;
         var body = new StackPanel { Margin = new Thickness(26, 0, 26, 24) };
         if (State.Error != null || localError != null) {
@@ -150,7 +166,7 @@ public sealed class MainWindow : Window
             title.Children.Add(Text(T("accounts"), 28, bold: true));
             var count = Text(L($"{State.Accounts.Length} 个账号", $"{State.Accounts.Length} accounts"), 16, muted: true); count.Margin = new Thickness(20, 0, 0, 0); title.Children.Add(count);
             var commands = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right };
-            var add = Button(T(State.IsAddingAccount ? "cancel_add_account" : "add_account"), () => _ = Run(State.IsAddingAccount ? "cancelAdd" : "add"), State.IsAddingAccount ? "\uE711" : "\uE710"); Primary(add); commands.Children.Add(add);
+            var add = Button(T(State.IsAddingAccount ? "cancel_add_account" : "add_account"), OpenAddAccount, State.IsAddingAccount ? "\uE711" : "\uE710"); Primary(add); commands.Children.Add(add);
             if (client is IAccountImporter) {
                 var import = Button(L("导入", "Import"), OpenJsonImport, "\uE896"); import.IsEnabled &= !State.IsAddingAccount; import.Margin = new Thickness(10, 0, 0, 0);
                 AutomationProperties.SetName(import, L("粘贴 JSON", "Paste JSON")); commands.Children.Add(import);
@@ -178,13 +194,18 @@ public sealed class MainWindow : Window
             var header = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 26, 0, 24) }; header.Children.Add(back); header.Children.Add(heading); body.Children.Add(header);
             if (page == "settings") Settings(body); else Confirmation(body);
         }
-        var scroll = new ScrollViewer { Content = body, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
-        scroll.SetResourceReference(BackgroundProperty, "Surface"); Content = scroll;
+        scroll.Content = body;
+        scroll.ScrollToVerticalOffset(offset);
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => {
+            if (generation != renderGeneration) return;
+            scroll.UpdateLayout(); scroll.ScrollToVerticalOffset(offset); pendingScrollOffset = null;
+        }));
     }
     private void Accounts(StackPanel body)
     {
         if (!State.ActiveIdentityConfirmed) { var warning = Text(T("active_unconfirmed"), 14, muted: true); warning.TextWrapping = TextWrapping.Wrap; warning.Margin = new Thickness(0, 0, 0, 16); body.Children.Add(warning); }
-        var list = new UniformGrid { Columns = AccountColumnCount, Margin = new Thickness(-8, -8, -8, 0) };
+        var list = new AdaptiveCardGrid { Margin = new Thickness(-8, -8, -8, 0) };
+        accountGrid = list;
         foreach (var row in State.Accounts) list.Children.Add(AccountItem(row));
         if (State.Accounts.Length == 0) {
             var empty = Text(T("no_accounts"), 17, muted: true); empty.Margin = new Thickness(24, 54, 24, 54); empty.TextWrapping = TextWrapping.Wrap; body.Children.Add(Box(empty));
@@ -192,6 +213,15 @@ public sealed class MainWindow : Window
         var save = Button(T("register_current_account"), () => _ = Run("register"), "\uE74E"); save.IsEnabled &= !State.IsAddingAccount;
         save.Margin = new Thickness(0, 18, 0, 0); save.HorizontalAlignment = HorizontalAlignment.Left;
         save.ToolTip = L("将 Codex 当前已登录的账号保存到列表", "Save the account currently signed in to Codex"); body.Children.Add(save);
+    }
+    private void OpenAddAccount()
+    {
+        if (IsBusy) return;
+        if (State.IsAddingAccount) { _ = Run("cancelAdd"); return; }
+        var choice = new AddAccountWindow(Chinese, client is IAccountImporter) { Owner = this };
+        if (choice.ShowDialog() != true || IsBusy || State.IsAddingAccount) return;
+        if (choice.SelectedMethod == AddAccountMethod.Browser) _ = Run("add");
+        else if (choice.SelectedMethod == AddAccountMethod.Json) OpenJsonImport();
     }
     private void OpenJsonImport() {
         if (client is IAccountImporter importer && !IsBusy && !State.IsAddingAccount) new JsonImportWindow(importer) { Owner = this }.ShowDialog();
@@ -273,23 +303,24 @@ public sealed class MainWindow : Window
         if (row.Usage?.ResetCreditsExpireAt is { } expires) creditExpiry.ToolTip = expires.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
         Grid.SetColumn(creditExpiry, 1); creditLine.Children.Add(creditExpiry); metadata.Children.Add(creditLine);
         metadata.Children.Add(Rule()); Grid.SetRow(metadata, 2); card.Children.Add(metadata);
-        var actions = new Grid { Margin = new Thickness(0, 12, 0, 0) };
-        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); actions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        actions.ColumnDefinitions.Add(new ColumnDefinition()); actions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); actions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var actions = new AccountActionsPanel { Margin = new Thickness(0, 12, 0, 0) };
+        var accountActions = new StackPanel { Orientation = Orientation.Horizontal };
+        var utilityActions = new StackPanel { Orientation = Orientation.Horizontal };
+        actions.Children.Add(accountActions); actions.Children.Add(utilityActions);
         var change = Button(active ? L("使用中", "In use") : L("切换", "Switch"), () => { if (!active) StartConfirmation(row, "switch"); }, active ? "\uE73E" : "\uE8AB");
         change.MinWidth = 86; change.IsEnabled &= !active && !State.IsAddingAccount; if (!active) Primary(change);
         AutomationProperties.SetName(change, row.Profile.Email ?? row.Profile.DisplayName);
-        change.ToolTip = active ? L("当前使用的账号", "Current account") : L("确认后切换此账号", "Confirm before switching to this account"); actions.Children.Add(change);
+        change.ToolTip = active ? L("当前使用的账号", "Current account") : L("确认后切换此账号", "Confirm before switching to this account"); accountActions.Children.Add(change);
         var count = row.Usage?.ResetCreditsRemaining?.ToString(CultureInfo.CurrentCulture) ?? T("unknown");
         var reset = Button(L("重置 " + count + " 次", "Reset " + count), () => { if (row.Usage?.ResetCreditsRemaining > 0) StartConfirmation(row, "resetQuota"); }, "\uE777");
         reset.IsEnabled &= !State.IsAddingAccount && row.Usage?.ResetCreditsRemaining > 0; reset.Margin = new Thickness(10, 0, 0, 0);
         reset.ToolTip = row.Usage?.ResetCreditsRemaining switch { null => L("可用重置次数未知，请先刷新。", "Reset credits are unknown; refresh first."), <= 0 => L("没有可用重置次数。", "No reset credits available."), _ => L("确认后消耗 1 次重置机会。", "Confirm to use one reset credit.") };
-        AutomationProperties.SetName(reset, L("重置额度", "Reset quota")); Grid.SetColumn(reset, 1); actions.Children.Add(reset);
-        var refresh = Button("", () => _ = Run("refresh", row.Profile.Id), "\uE72C"); refresh.Margin = new Thickness(10, 0, 0, 0); refresh.IsEnabled &= !State.IsAddingAccount;
-        refresh.ToolTip = L("刷新此账号", "Refresh this account"); AutomationProperties.SetName(refresh, L("刷新此账号", "Refresh this account")); Grid.SetColumn(refresh, 3); actions.Children.Add(refresh);
+        AutomationProperties.SetName(reset, L("重置额度", "Reset quota")); accountActions.Children.Add(reset);
+        var refresh = Button("", () => _ = Run("refresh", row.Profile.Id), "\uE72C"); refresh.IsEnabled &= !State.IsAddingAccount;
+        refresh.ToolTip = L("刷新此账号", "Refresh this account"); AutomationProperties.SetName(refresh, L("刷新此账号", "Refresh this account")); utilityActions.Children.Add(refresh);
         var remove = Button("", () => { if (!active) StartConfirmation(row, "remove"); }, "\uE74D"); remove.Margin = new Thickness(8, 0, 0, 0);
         remove.IsEnabled &= !active && !State.IsAddingAccount; remove.ToolTip = active ? L("不能删除当前使用的账号", "Cannot delete the current account") : L("删除此账号", "Delete this account");
-        AutomationProperties.SetName(remove, T("remove")); Grid.SetColumn(remove, 4); actions.Children.Add(remove);
+        AutomationProperties.SetName(remove, T("remove")); utilityActions.Children.Add(remove);
         Grid.SetRow(actions, 3); card.Children.Add(actions);
         var border = Box(card, active ? "Selected" : "ListSurface", 12); border.Margin = new Thickness(8); border.MinHeight = 350;
         if (active) border.SetResourceReference(Border.BorderBrushProperty, "AccentBorder");
@@ -309,12 +340,18 @@ public sealed class MainWindow : Window
         track.SizeChanged += (_, _) => fill.Width = track.ActualWidth * Math.Clamp(percent ?? 0, 0, 100) / 100.0; track.Children.Add(fill);
         AutomationProperties.SetName(track, title + " " + (percent?.ToString() ?? T("unknown")) + (percent.HasValue ? "%" : ""));
         Grid.SetRow(track, 1); grid.Children.Add(track);
+        var scheduleText = L("恢复时间未知", "Renewal time unknown");
+        string? scheduleTip = null;
         if (reset is { } time) {
+            var currentTime = now();
             var localTime = time.ToLocalTime();
-            var when = !weekly && localTime.Date == now().ToLocalTime().Date ? L("今天 ", "Today ") + localTime.ToString("HH:mm") : localTime.ToString("MM-dd HH:mm");
-            var schedule = Text(when + L(" 恢复", " renews"), 14, bold: true); schedule.SetResourceReference(TextBlock.ForegroundProperty, "Schedule");
-            schedule.ToolTip = localTime.ToString("yyyy-MM-dd HH:mm:ss"); Grid.SetRow(schedule, 2); grid.Children.Add(schedule);
+            var when = !weekly && localTime.Date == currentTime.ToLocalTime().Date ? L("今天 ", "Today ") + localTime.ToString("HH:mm") : localTime.ToString("MM-dd HH:mm");
+            scheduleText = when + L(" 恢复（", " renews (") + AccountVisuals.QuotaCountdown(time, currentTime, Chinese) + L("）", ")");
+            scheduleTip = localTime.ToString("yyyy-MM-dd HH:mm:ss");
         }
+        var schedule = Text(scheduleText, 14, bold: true); schedule.SetResourceReference(TextBlock.ForegroundProperty, "Schedule");
+        schedule.TextWrapping = TextWrapping.Wrap; schedule.TextTrimming = TextTrimming.None;
+        schedule.ToolTip = scheduleTip; Grid.SetRow(schedule, 2); grid.Children.Add(schedule);
         return grid;
     }
     private string ResetCreditExpiry(Usage? usage, bool compact = false) => usage?.ResetCreditsExpireAt is { } expiry

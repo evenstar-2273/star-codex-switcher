@@ -45,7 +45,7 @@ public partial class App : Application
     private NativeSettings? themeSettings;
     private bool observingTheme;
     public bool UsesDarkPalette { get; private set; }
-    public string AccentPreference { get; private set; } = "blue";
+    public string AccentPreference { get; private set; } = "purple";
     public event Action? PaletteChanged;
 
     protected override async void OnStartup(StartupEventArgs e)
@@ -236,7 +236,7 @@ public partial class App : Application
     }
     private void ApplyAccent(bool dark)
     {
-        AccentPreference = themeSettings?.AccentPreference ?? "blue";
+        AccentPreference = themeSettings?.AccentPreference ?? "purple";
         var colors = AccentColors(AccentPreference);
         var accent = CreateAccentBrush(AccentPreference);
         Resources["Accent"] = accent;

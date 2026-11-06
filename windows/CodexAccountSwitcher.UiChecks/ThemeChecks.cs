@@ -12,7 +12,7 @@ internal static class ThemeChecks
         try {
             var settings = new NativeSettings(key);
             Require(settings.ThemePreference == "system", "Absent theme preference defaults to the system.");
-            Require(settings.AccentPreference == "blue", "Absent accent preference defaults to ocean blue.");
+            Require(settings.AccentPreference == "purple", "Absent accent preference defaults to twilight purple.");
             settings.ThemePreference = "dark";
             Require(new NativeSettings(key).ThemePreference == "dark", "Theme preference persists for the current user.");
             app.UseThemeSettings(settings); app.ApplyThemePreference(false);
@@ -62,9 +62,9 @@ internal static class ThemeChecks
                 Require(Contrast(schedule, surface) >= 4.5, "Quota recovery times remain legible on the card surface.");
             }
             using (var registry = Registry.CurrentUser.CreateSubKey(key)) registry.SetValue("AccentPreference", "not-a-color");
-            Require(settings.AccentPreference == "blue", "Invalid stored accents fall back to ocean blue.");
+            Require(settings.AccentPreference == "purple", "Invalid stored accents fall back to twilight purple.");
             settings.AccentPreference = "invalid";
-            using (var registry = Registry.CurrentUser.OpenSubKey(key)) Require((string?)registry?.GetValue("AccentPreference") == "blue", "Invalid accent assignments persist their normalized fallback.");
+            using (var registry = Registry.CurrentUser.OpenSubKey(key)) Require((string?)registry?.GetValue("AccentPreference") == "purple", "Invalid accent assignments persist their normalized fallback.");
             settings.AccentPreference = "purple"; settings.ThemePreference = "system";
             app.ApplyThemePreference(false); Require(!app.UsesDarkPalette && app.AccentPreference == "purple", "System light mode retains the selected accent.");
             app.ApplyThemePreference(true); Require(app.UsesDarkPalette && app.AccentPreference == "purple", "System dark mode retains the selected accent.");

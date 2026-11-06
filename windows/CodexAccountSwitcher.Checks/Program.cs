@@ -10,6 +10,7 @@ if (args.FirstOrDefault() == "guarded") return await GuardedChecks.RunAsync(args
 if (args.FirstOrDefault() == "plans") return await PlanChecks.RunAsync();
 if (args.FirstOrDefault() == "reset-credits") return await ResetCreditsChecks.RunAsync();
 if (args.FirstOrDefault() == "subscriptions") return await SubscriptionChecks.RunAsync();
+if (args.FirstOrDefault() == "login-cancel") return await LoginCancellationChecks.RunAsync(args.ElementAtOrDefault(1));
 
 if (args.FirstOrDefault() == "desktop-close") {
     var fixture = args.ElementAtOrDefault(1);

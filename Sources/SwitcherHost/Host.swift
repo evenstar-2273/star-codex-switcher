@@ -31,11 +31,23 @@ private final class Host {
     func platform(_ method: String, url: URL? = nil) async throws {
         nextID += 1
         let id = nextID
-        try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
-            var message: [String: Any] = ["kind": "platform", "id": id, "method": method]
-            if let url { message["url"] = url.absoluteString }
-            send(message)
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pending[id] = continuation
+                var message: [String: Any] = ["kind": "platform", "id": id, "method": method]
+                if let url { message["url"] = url.absoluteString }
+                send(message)
+            }
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.pending.removeValue(forKey: id)?.resume(throwing: CancellationError())
+            }
         }
     }
 
@@ -86,7 +98,7 @@ private final class Host {
         switch request.command {
         case "refresh": model.refreshWeeklyUsage()
         case "add": model.addAccount()
-        case "cancelAdd": model.cancelAddingAccount()
+        case "cancelAdd": await model.cancelAddingAccountAndWait()
         case "register": await model.registerCurrentAccount()
         case "switch":
             guard let id = request.accountID else { throw HostError.message("Missing account ID.") }
@@ -133,12 +145,13 @@ private final class Host {
         try? FileHandle.standardOutput.write(contentsOf: bytes)
     }
 
-    func shutdown() {
+    func shutdown() async {
         controller?.cancelAddingAccount()
         controller?.stopBackgroundUsageRefresh()
         for task in commands.values { task.cancel() }
         for continuation in pending.values { continuation.resume(throwing: CancellationError()) }
         pending.removeAll()
+        await controller?.cancelAddingAccountAndWait()
     }
 }
 
@@ -154,6 +167,6 @@ struct SwitcherHost {
         await Task.detached {
             while let line = readLine() { await host.accept(line) }
         }.value
-        host.shutdown()
+        await host.shutdown()
     }
 }

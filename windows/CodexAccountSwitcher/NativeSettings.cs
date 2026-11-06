@@ -26,7 +26,7 @@ public sealed class NativeSettings
         }
     }
     public event Action? ThemePreferenceChanged;
-    public static string NormalizeAccentPreference(string? value) => value is "purple" or "teal" or "orange" ? value : "blue";
+    public static string NormalizeAccentPreference(string? value) => value is "blue" or "teal" or "orange" ? value : "purple";
     public string AccentPreference {
         get { using var key = Registry.CurrentUser.OpenSubKey(settingsKey); return NormalizeAccentPreference(key?.GetValue("AccentPreference") as string); }
         set {

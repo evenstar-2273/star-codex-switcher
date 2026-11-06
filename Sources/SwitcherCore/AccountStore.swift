@@ -227,6 +227,7 @@ public actor AccountStore: AccountStoring {
     }
 
     public func addProfile(_ profile: AccountProfile) throws {
+        try Task.checkCancellation()
         let authURL = profileHome(id: profile.id).appending(path: "auth.json")
         guard fileManager.fileExists(atPath: authURL.path) else {
             throw AccountStoreError.targetCredentialMissing
@@ -238,6 +239,8 @@ public actor AccountStore: AccountStoring {
             throw AccountStoreError.duplicateAccount
         }
         current.accounts.append(profile)
+        // This actor owns the commit; cancellation while waiting to enter it must not save a login.
+        try Task.checkCancellation()
         try saveRegistry(current)
     }
 

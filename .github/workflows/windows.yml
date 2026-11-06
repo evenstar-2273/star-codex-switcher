@@ -33,6 +33,19 @@ jobs:
         run: |
           ./scripts/package-windows.ps1 -OutputDirectory ./windows/artifacts/source-build
           Expand-Archive -LiteralPath ./windows/artifacts/source-build/SwiftRuntime.zip -DestinationPath ./windows/artifacts/installer-runtime -Force
+      - name: Upload freshly compiled host runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-runtime-${{ github.sha }}
+          path: windows/artifacts/source-build/SwiftRuntime.zip
+          if-no-files-found: error
+      - name: Check cancellable authorization
+        shell: pwsh
+        run: |
+          swift test --filter AccountCancellationTests
+          if ($LASTEXITCODE -ne 0) { throw 'Swift cancellation checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- login-cancel ./windows/artifacts/installer-runtime/SwitcherHost.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Authorization cancellation checks failed.' }
       - name: Check guarded login, import and recovery
         shell: pwsh
         run: |

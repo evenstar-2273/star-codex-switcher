@@ -68,4 +68,18 @@ public static class AccountVisuals
         if (days > 99) return chinese ? "剩余 99+ 天" : "99+ days left";
         return chinese ? $"剩余 {days} 天" : $"{days} days left";
     }
+
+    public static string QuotaCountdown(DateTimeOffset? until, DateTimeOffset now, bool chinese)
+    {
+        if (until == null) return chinese ? "剩余时间未知" : "Time remaining unknown";
+        var remaining = until.Value - now;
+        if (remaining <= TimeSpan.Zero) return chinese ? "已到恢复时间，待刷新确认" : "Renewal time reached; refresh to confirm";
+        if (remaining < TimeSpan.FromMinutes(1)) return chinese ? "剩余不足 1 分钟" : "Less than 1 minute left";
+        var days = (int)remaining.TotalDays;
+        var hours = remaining.Hours;
+        var minutes = remaining.Minutes;
+        if (days > 0) return chinese ? $"剩余 {days} 天 {hours} 小时" : $"{days}d {hours}h left";
+        if (hours > 0) return chinese ? $"剩余 {hours} 小时 {minutes} 分钟" : $"{hours}h {minutes}m left";
+        return chinese ? $"剩余 {minutes} 分钟" : $"{minutes}m left";
+    }
 }

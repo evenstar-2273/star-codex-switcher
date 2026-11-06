@@ -70,7 +70,8 @@ internal static class Program
             ThemeChecks.Run(app);
             var native = new NativeSettings(settingsKey) { ThemePreference = "light" };
             var client = new FixtureClient();
-            var window = new MainWindow(client, native);
+            var presentationNow = DateTimeOffset.Parse("2026-11-06T12:00:00+08:00");
+            var window = new MainWindow(client, native, () => presentationNow);
             Assert(window.Title == App.DisplayName, "The main window uses the agreed Star Codex Switcher display name.");
             Assert(window.Icon != null, "The taskbar and title bar must use the packaged application logo.");
             BrandingChecks.Run();
@@ -192,6 +193,8 @@ internal static class Program
             client.State = original;
             ResponsiveAndReset(window, client, output);
             AccentThemes(app, window, client, native, settingsKey, output);
+            AddAccountFlow(app, window, client, native, output);
+            SettingsScroll(window, client, native, output);
             var closed = false; window.Closed += (_, _) => closed = true;
             var beforeClose = client.Commands.Count;
             window.Close();
@@ -251,6 +254,13 @@ internal static class Program
         Assert(AccountVisuals.ExpiryRemaining(now.AddSeconds(1), now, true) == "剩余 1 小时", "A positive partial hour rounds upward.");
         Assert(AccountVisuals.ExpiryRemaining(now.AddDays(25).AddMinutes(1), now, true) == "剩余 26 天", "Remaining days round upward from elapsed hours, not calendar boundaries.");
         Assert(AccountVisuals.ExpiryRemaining(now.AddDays(100), now, true) == "剩余 99+ 天", "Long subscriptions display 99+ days.");
+        Assert(AccountVisuals.QuotaCountdown(now.AddHours(2).AddMinutes(18), now, true) == "剩余 2 小时 18 分钟", "Hourly renewal displays hours and minutes.");
+        Assert(AccountVisuals.QuotaCountdown(now.AddDays(5).AddHours(21), now, true) == "剩余 5 天 21 小时", "Weekly renewal displays days and hours.");
+        Assert(AccountVisuals.QuotaCountdown(now.AddSeconds(59), now, true) == "剩余不足 1 分钟", "A positive sub-minute interval never appears expired.");
+        Assert(AccountVisuals.QuotaCountdown(now.AddMinutes(1), now, true) == "剩余 1 分钟", "The minute boundary is explicit.");
+        Assert(AccountVisuals.QuotaCountdown(now, now, true) == "已到恢复时间，待刷新确认" && AccountVisuals.QuotaCountdown(now.AddDays(-1), now, false).Contains("refresh to confirm"), "A passed renewal time does not claim quota was restored.");
+        Assert(AccountVisuals.QuotaCountdown(null, now, true) == "剩余时间未知" && AccountVisuals.QuotaCountdown(null, now, false) == "Time remaining unknown", "Missing renewal time remains unknown in both languages.");
+        Assert(AccountVisuals.QuotaCountdown(now.AddHours(2).AddMinutes(18), now.AddMinutes(1), false) == "2h 17m left", "A later presentation refresh advances the countdown.");
     }
     private static void UpdateRules() {
         Assert(NativeSettings.FormatVersion(new Version("1.0.0.0")) == "1.0.0" && NativeSettings.FormatVersion(new Version("1.0.1.0")) == "1.0.1", "New releases omit a zero revision in user-facing version labels.");
@@ -272,23 +282,24 @@ internal static class Program
         var now = new DateTimeOffset(2026, 11, 6, 12, 0, 0, TimeSpan.FromHours(8));
         var plans = new[] { "free", "plus", "prolite", "pro", "promax" };
         var rows = plans.Select((plan, i) => new AccountRow(new Profile(Guid.NewGuid(), plan, plan + "@example.test"), "P",
-            new Usage(66, now.AddDays(6), i == 2 ? null : 91, i == 2 ? null : now.AddHours(3), i == 0 ? 0 : 3, now.AddDays(1), plan),
+            new Usage(66, now.AddDays(6), i == 2 ? null : 91, i is 2 or 4 ? null : now.AddHours(3), i == 0 ? 0 : i == 2 ? null : 3, now.AddDays(1), plan),
             null, "loaded", i == 0 ? null : new SubscriptionSnapshot(now.AddDays(29), now, "accounts_check", true), plan, "verified")).ToArray();
         client.State = saved with { Accounts = rows, ActiveAccountID = rows[1].Profile.Id, Settings = saved.Settings with { ShowsFiveHourUsage = false } };
         void AssertResponsiveLayout(double requestedWidth) {
             // Win32 can cap the window at the runner's maximum tracking size. Layout follows
             // the size that was actually arranged, rather than an unapplied Width request.
             var actualWidth = window.ActualWidth;
-            var expectedColumns = actualWidth >= 1560 ? 3 : actualWidth >= 980 ? 2 : 1;
             var list = All<UniformGrid>(window).Single(grid => grid.Children.Count == rows.Length && grid.Children.OfType<Border>().Count() == rows.Length);
+            var expectedColumns = Math.Clamp((int)Math.Floor((list.ActualWidth + 0.01) / 396), 1, 3);
             var cards = list.Children.Cast<FrameworkElement>().ToArray();
             var points = cards.Select(card => card.TranslatePoint(new Point(), list)).ToArray();
-            Console.WriteLine($"Responsive layout: requested={requestedWidth:0.##}, actual={actualWidth:0.##}, columns={window.AccountColumnCount}, rendered={list.Columns}.");
+            Console.WriteLine($"Responsive layout: requested={requestedWidth:0.##}, actual={actualWidth:0.##}, content={list.ActualWidth:0.##}, columns={window.AccountColumnCount}, card={cards[0].ActualWidth:0.##}.");
             Assert(window.AccountColumnCount == expectedColumns && list.Columns == expectedColumns,
                 $"Arranged window width selects the rendered account columns (requested {requestedWidth}, actual {actualWidth}, expected {expectedColumns}, rendered {list.Columns}).");
             for (var i = 0; i < cards.Length; i++) {
                 Assert(cards[i].ActualWidth > 0 && points[i].X >= -1 && points[i].X + cards[i].ActualWidth <= list.ActualWidth + 1,
                     "Each account card fits within the arranged list width.");
+                Assert(expectedColumns == 1 || cards[i].ActualWidth >= 379, "Automatic columns preserve a usable minimum card width.");
                 if (i % expectedColumns != 0) {
                     Assert(Math.Abs(points[i].Y - points[i - 1].Y) <= 1 && points[i].X >= points[i - 1].X + cards[i - 1].ActualWidth - 1,
                         "Cards in the same rendered row sit side by side without overlap.");
@@ -296,15 +307,54 @@ internal static class Program
                     Assert(Math.Abs(points[i].X - points[0].X) <= 1 && points[i].Y >= points[i - expectedColumns].Y + cards[i - expectedColumns].ActualHeight - 1,
                         "The next card row wraps below the previous row and aligns with the first column.");
                 }
+                var buttons = All<Button>(cards[i]).Where(button => button.IsVisible).ToArray();
+                foreach (var button in buttons) {
+                    var point = button.TranslatePoint(new Point(), cards[i]);
+                    Assert(point.X >= -1 && point.X + button.ActualWidth <= cards[i].ActualWidth + 1,
+                        "Account action buttons stay inside each card at column breakpoints.");
+                }
+                for (var a = 0; a < buttons.Length; a++) for (var b = a + 1; b < buttons.Length; b++) {
+                    var first = new Rect(buttons[a].TranslatePoint(new Point(), cards[i]), buttons[a].RenderSize);
+                    var second = new Rect(buttons[b].TranslatePoint(new Point(), cards[i]), buttons[b].RenderSize);
+                    first.Intersect(second);
+                    Assert(first.IsEmpty || first.Width <= 1 || first.Height <= 1, "Actions do not overlap in narrow multi-column cards.");
+                }
             }
+            Assert(All<TextBlock>(window).Where(text => text.Text.Contains("@example.test")).All(text => text.TextWrapping == TextWrapping.NoWrap &&
+                text.TextTrimming == TextTrimming.CharacterEllipsis && Equals(text.ToolTip, text.Text)), "Breakpoint layouts retain single-line email trimming and full address tooltips.");
         }
-        foreach (var width in new[] { 480, 1280, 1700 }) {
+        foreach (var width in new[] { 480d, 840, 859, 860, 880, 1279, 1280, 1300, 1700, 1309 / 1.5 }) {
             window.Width = width; window.Height = 760;
-            window.Navigate("accounts"); Render(window, Path.Combine(output, $"responsive-{width}.png"));
+            window.Navigate("accounts"); Render(window, Path.Combine(output, $"responsive-{width:0.##}.png"));
             AssertResponsiveLayout(width);
             Assert(!All<ScrollViewer>(window).Any(view => view.ComputedHorizontalScrollBarVisibility == Visibility.Visible), "Narrow layout never needs horizontal scrolling.");
             Assert(All<TextBlock>(window).Count(text => text.Text == "5 小时剩余") == 4, "Only accounts with a five-hour window show that quota, regardless of the removed preference.");
+            Assert(All<TextBlock>(window).Where(text => text.Text.Contains(" 恢复（")).All(text => text.Text.Contains("剩余") && text.TextWrapping == TextWrapping.Wrap && text.TextTrimming == TextTrimming.None),
+                "Renewal timestamps include a countdown that can wrap without truncation on narrow cards.");
+            Assert(All<TextBlock>(window).Any(text => text.Text == "恢复时间未知"), "An unknown five-hour renewal time is explicitly identified.");
         }
+        // Exercise the actual content-width boundaries, including the window frame and
+        // scrollbar rather than assuming physical screen pixels equal WPF layout units.
+        var adaptiveGrid = All<AdaptiveCardGrid>(window).Single();
+        var frameAndPadding = window.ActualWidth - adaptiveGrid.ActualWidth;
+        foreach (var contentWidth in new[] { 791d, 792, 800, 1187, 1188, 1200 }) {
+            window.Width = contentWidth + frameAndPadding;
+            Render(window, Path.Combine(output, $"responsive-content-{contentWidth:0}.png"));
+            Assert(ReferenceEquals(adaptiveGrid, All<AdaptiveCardGrid>(window).Single()), "Changing column count reflows the existing cards without rebuilding the page.");
+            AssertResponsiveLayout(window.Width);
+        }
+        client.State = client.State with { Settings = client.State.Settings with { Language = "english" } }; client.RaiseChanged();
+        foreach (var contentWidth in new[] { 792d, 1188 }) {
+            window.Width = contentWidth + frameAndPadding;
+            Render(window, Path.Combine(output, $"responsive-english-unknown-{contentWidth:0}.png"));
+            AssertResponsiveLayout(window.Width);
+            var unknownCard = All<AdaptiveCardGrid>(window).Single().Children.OfType<Border>().Single(card => All<TextBlock>(card).Any(text => text.Text == "Reset Unknown"));
+            var reset = All<Button>(unknownCard).Single(button => Name(button) == "Reset quota");
+            var refresh = All<Button>(unknownCard).Single(button => Name(button) == "Refresh this account");
+            Assert(refresh.TranslatePoint(new Point(), unknownCard).Y >= reset.TranslatePoint(new Point(), unknownCard).Y + reset.ActualHeight,
+                "Unknown English reset counts retain their full text while utility actions wrap inside the minimum-width card.");
+        }
+        client.State = client.State with { Settings = client.State.Settings with { Language = saved.Settings.Language } }; client.RaiseChanged();
         var previousMaxWidth = window.MaxWidth;
         try {
             window.MaxWidth = 1044; window.Width = 1700;
@@ -382,6 +432,90 @@ internal static class Program
         native.AccentPreference = "blue"; native.ThemePreference = "light"; window.Width = 1100; window.Navigate("accounts");
         Console.WriteLine("PASS: all four accents rendered in light/dark settings, account cards and switch confirmation; narrow wrapping and persistent selection verified.");
     }
+    private static void AddAccountFlow(App app, MainWindow window, FixtureClient client, NativeSettings native, string output)
+    {
+        var before = client.Commands.Count;
+        var saved = client.State;
+        Exception? failure = null;
+        void Schedule(Action action) => window.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => {
+            try { action(); } catch (Exception ex) {
+                failure = ex;
+                foreach (var dialog in app.Windows.OfType<Window>().Where(dialog => dialog is AddAccountWindow or JsonImportWindow).ToArray()) dialog.Close();
+            }
+        }));
+        void Open(Action<AddAccountWindow> choose) {
+            window.Navigate("accounts"); window.UpdateLayout();
+            Schedule(() => {
+                var dialog = app.Windows.OfType<AddAccountWindow>().Single(); dialog.UpdateLayout();
+                Assert(client.Commands.Count == before, "Opening the account method chooser cannot begin authorization or import.");
+                Assert(All<Button>(dialog).Count(button => Name(button) is "浏览器授权" or "JSON 导入") == 2, "The add dialog presents both supported methods.");
+                choose(dialog);
+            });
+            All<Button>(window).Single(button => Name(button) == "添加账号").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (failure != null) throw failure;
+        }
+        foreach (var dark in new[] { false, true }) {
+            native.ThemePreference = dark ? "dark" : "light";
+            Open(dialog => {
+                Render(dialog, Path.Combine(output, $"add-methods-{(dark ? "dark" : "light")}.png"));
+                Assert(dialog.Title == "添加账号 · " + App.DisplayName && dialog.Icon != null, "Method chooser keeps product branding.");
+                All<Button>(dialog).Single(button => Name(button) == "取消").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            });
+            Assert(client.Commands.Count == before, "Cancelling method selection has no account side effect.");
+        }
+        Open(dialog => dialog.Close());
+        Assert(client.Commands.Count == before, "Closing the method dialog through its window close action is inert.");
+        Open(dialog => {
+            Schedule(() => {
+                var import = app.Windows.OfType<JsonImportWindow>().Single();
+                Render(import, Path.Combine(output, "add-methods-json-import.png"));
+                Assert(All<TextBox>(import).Single().AcceptsReturn && All<Button>(import).Any(button => Name(button) == "选择 JSON 文件导入"), "Choosing JSON opens both text and file import options.");
+                Assert(client.Commands.Count == before, "Choosing JSON cannot start browser authorization.");
+                import.Close();
+            });
+            All<Button>(dialog).Single(button => Name(button) == "JSON 导入").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        });
+        Assert(client.Commands.Count == before, "Closing JSON without submission is inert.");
+        Open(dialog => All<Button>(dialog).Single(button => Name(button) == "浏览器授权").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+        Assert(client.Commands.Count == before + 1 && client.Commands.Last() == "add:", "Only selecting browser authorization issues one add command.");
+        client.State = saved with { IsAddingAccount = true }; client.RaiseChanged(); window.UpdateLayout();
+        All<Button>(window).Single(button => Name(button) == "取消添加").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Assert(client.Commands.Count == before + 2 && client.Commands.Last() == "cancelAdd:" && !app.Windows.OfType<AddAccountWindow>().Any(), "Pending sign-in cancellation sends cancelAdd directly without reopening the chooser.");
+        client.State = saved; client.RaiseChanged(); native.ThemePreference = "light";
+        Console.WriteLine("PASS: account-method chooser, inert cancel/close, JSON text/file route, explicit browser authorization and pending cancellation (fixture only).");
+    }
+    private static void SettingsScroll(MainWindow window, FixtureClient client, NativeSettings native, string output)
+    {
+        var saved = client.State; window.Width = 860; window.Height = 520; window.Navigate("settings");
+        Render(window, Path.Combine(output, "settings-scroll-initial.png"));
+        var scroll = (ScrollViewer)window.Content;
+        scroll.ScrollToVerticalOffset(Math.Min(450, scroll.ScrollableHeight)); window.UpdateLayout();
+        var position = scroll.VerticalOffset;
+        Assert(position > 100, "The settings regression fixture must start below the top.");
+        var originalBody = scroll.Content;
+        client.State = saved with { Accounts = saved.Accounts.Select(row => row with { UsageStatus = "refreshing" }).ToArray() };
+        client.RaiseChanged(); window.UpdateLayout();
+        Assert(ReferenceEquals(scroll.Content, originalBody) && Math.Abs(scroll.VerticalOffset - position) < 1,
+            "Background account refreshes do not rebuild or scroll the settings page.");
+        All<Button>(window).Single(button => Name(button) == "主题色：暮光紫").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Render(window, Path.Combine(output, "settings-scroll-after-accent.png"));
+        Assert(ReferenceEquals(window.Content, scroll) && Math.Abs(scroll.VerticalOffset - position) < 1, "Changing the accent retains the existing scroll viewer and vertical position.");
+        // Simulate a host preference acknowledgement at the current scroll position.
+        client.State = saved with { Settings = saved.Settings with { AutoResetEnabled = !saved.Settings.AutoResetEnabled } }; client.RaiseChanged();
+        Render(window, Path.Combine(output, "settings-scroll-after-toggle.png"));
+        Assert(Math.Abs(scroll.VerticalOffset - position) < 1, "An acknowledged setting change does not jump to the top.");
+        client.State = client.State with { IsMutating = true }; client.RaiseChanged();
+        client.State = client.State with { IsMutating = false }; client.RaiseChanged();
+        Render(window, Path.Combine(output, "settings-scroll-after-burst.png"));
+        Assert(Math.Abs(scroll.VerticalOffset - position) < 1, "Consecutive state notifications preserve the pending scroll restoration.");
+        native.ThemePreference = "dark";
+        Render(window, Path.Combine(output, "settings-scroll-after-theme.png"));
+        Assert(Math.Abs(scroll.VerticalOffset - position) < 1, "Changing brightness preserves the current position.");
+        window.Navigate("accounts"); Render(window, Path.Combine(output, "settings-scroll-navigation.png"));
+        Assert(scroll.VerticalOffset == 0, "Navigating to a different page starts at the top.");
+        client.State = saved; client.RaiseChanged(); native.AccentPreference = "blue"; native.ThemePreference = "light"; window.Height = 760;
+        Console.WriteLine("PASS: stable settings scroll container, no redundant account-refresh render, same-page scroll preservation and deliberate navigation reset.");
+    }
     private static string Name(DependencyObject value) => System.Windows.Automation.AutomationProperties.GetName(value);
     private static void Assert(bool condition, string message) { if (!condition) throw new Exception(message); }
     private static IEnumerable<T> All<T>(DependencyObject parent) where T : DependencyObject {
@@ -403,7 +537,8 @@ internal static class Program
         public bool FailImport { get; set; }
         public Task<ImportResult> ImportTextAsync(string json) => FailImport ? Task.FromException<ImportResult>(new FormatException("模拟格式错误")) : Task.FromResult(new ImportResult(1, 0, 0));
         public Task<ImportResult> ImportFilesAsync(string[] paths) => Task.FromResult(new ImportResult(1, 0, 0));
-        public event Action? Changed { add {} remove {} }
+        public event Action? Changed;
+        public void RaiseChanged() => Changed?.Invoke();
         public List<string> Commands { get; } = [];
         public Guid? LastAccountId { get; private set; }
         public AccountSnapshot State { get; set; }

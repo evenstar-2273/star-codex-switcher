@@ -275,14 +275,15 @@ private actor JSONRPCSession {
     }
 
     public func stop() {
-        output.readabilityHandler = nil
-        errorOutput.readabilityHandler = nil
-        try? input.close()
         if process.isRunning {
             process.terminate()
         }
+        try? input.close()
         pump.finish()
         stderrDrain.finish()
+        // End the writer before detaching Windows pipe readers, which may be waiting for data.
+        output.readabilityHandler = nil
+        errorOutput.readabilityHandler = nil
     }
 
     private func response(id: Int, timeout: Duration) async throws -> RPCEnvelope {
