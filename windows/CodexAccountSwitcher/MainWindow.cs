@@ -34,8 +34,9 @@ public sealed class MainWindow : Window
     private string confirmationReturnPage = "accounts";
     private int renderedLayout;
     private AdaptiveCardGrid? accountGrid;
+    private RefreshRotation? refreshRotation;
     private bool layoutPending, closingForExit;
-    public bool IsBusy => client.State.IsMutating || native.IsInstalling;
+    public bool IsBusy => refreshRotation != null || client.State.IsMutating || native.IsInstalling;
     public string CurrentPage => page;
     public ScrollViewer PageScrollViewer => scroll;
     private double LayoutWidth => ActualWidth > 0 ? ActualWidth : Width;
@@ -98,6 +99,7 @@ public sealed class MainWindow : Window
         Closing += (_, e) => { if (!closingForExit) { e.Cancel = true; Hide(); } };
         Closed += (_, _) => {
             presentationTimer.Stop(); client.Changed -= OnClientChanged; this.native.Changed -= Render;
+            refreshRotation?.Dispose();
         };
         Render();
     }
@@ -109,6 +111,22 @@ public sealed class MainWindow : Window
     }
     public void Navigate(string destination) { page = destination == "manage" ? "accounts" : destination; target = null; localError = null; Render(); }
     private async Task Run(string command, Guid? id = null, bool? value = null, string? language = null) {
+        if (command == "refresh") {
+            if (IsBusy || State.IsAddingAccount || closingForExit) return;
+            // Keep one animation clock for the entire awaited request. Re-rendered icons
+            // use the same transform, so progress notifications do not restart the spin.
+            var rotation = new RefreshRotation(id);
+            refreshRotation = rotation; localError = null;
+            Render();
+            try { await client.CommandAsync(command, id, value, language); }
+            catch (Exception ex) { localError = ex.Message; }
+            finally {
+                rotation.Dispose();
+                if (ReferenceEquals(refreshRotation, rotation)) refreshRotation = null;
+                Render();
+            }
+            return;
+        }
         try { await client.CommandAsync(command, id, value, language); }
         catch (Exception ex) { localError = ex.Message; Render(); }
     }
@@ -132,6 +150,14 @@ public sealed class MainWindow : Window
     private void Primary(Button button) {
         button.SetResourceReference(Control.BackgroundProperty, "Accent"); button.SetResourceReference(Control.BorderBrushProperty, "Accent");
         button.SetResourceReference(Control.ForegroundProperty, "OnAccent");
+    }
+    private Button RefreshButton(string label, Guid? accountId = null) {
+        var button = Button(label, () => _ = Run("refresh", accountId), "\uE72C");
+        button.IsEnabled &= !State.IsAddingAccount;
+        var icon = ((StackPanel)button.Content).Children.OfType<TextBlock>().First();
+        icon.RenderTransformOrigin = new Point(.5, .5);
+        icon.RenderTransform = refreshRotation?.Includes(accountId) == true ? refreshRotation.Transform : new RotateTransform();
+        return button;
     }
     private Border Rule() { var rule = new Border { Height = 1 }; rule.SetResourceReference(Border.BackgroundProperty, "Line"); return rule; }
     private Border Box(UIElement child, string background = "ListSurface", double radius = 12) {
@@ -184,7 +210,7 @@ public sealed class MainWindow : Window
                 var import = Button(L("导入", "Import"), OpenJsonImport, "\uE896"); import.IsEnabled &= !State.IsAddingAccount; import.Margin = new Thickness(10, 0, 0, 0);
                 AutomationProperties.SetName(import, L("粘贴 JSON", "Paste JSON")); commands.Children.Add(import);
             }
-            var refresh = Button(L("刷新", "Refresh"), () => _ = Run("refresh"), "\uE72C"); refresh.IsEnabled &= !State.IsAddingAccount; refresh.Margin = new Thickness(10, 0, 0, 0); commands.Children.Add(refresh);
+            var refresh = RefreshButton(L("刷新", "Refresh")); refresh.Margin = new Thickness(10, 0, 0, 0); commands.Children.Add(refresh);
             var settings = Button(T("settings"), () => Navigate("settings"), "\uE713"); settings.Margin = new Thickness(10, 0, 0, 0);
             if (native.AvailableUpdate != null) settings.ToolTip = L("有新版本可用", "An update is available"); commands.Children.Add(settings);
             FrameworkElement header;
@@ -227,7 +253,7 @@ public sealed class MainWindow : Window
                 OwnedWindows.Cast<Window>().Any(window => window.IsVisible)) return;
             var prompt = native.BeginUpdatePrompt(allowAutomatic: page == "accounts");
             if (prompt == null) return;
-            var dialog = new UpdateAvailableWindow(native, prompt, Chinese, () => !State.IsMutating && !State.IsAddingAccount) { Owner = this };
+            var dialog = new UpdateAvailableWindow(native, prompt, Chinese, () => !IsBusy && !State.IsAddingAccount) { Owner = this };
             updateDialog = dialog; updateOverlay.Visibility = Visibility.Visible;
             try { dialog.ShowDialog(); }
             finally {
@@ -336,12 +362,7 @@ public sealed class MainWindow : Window
             missing.ToolTip = WindowsLocalization.Error(row.SubscriptionError, State.Settings.Language); expiry.Children.Add(missing);
         }
         metadata.Children.Add(expiry);
-        var creditLine = new Grid { Margin = new Thickness(0, 8, 0, 10) };
-        creditLine.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(26) }); creditLine.ColumnDefinitions.Add(new ColumnDefinition());
-        creditLine.Children.Add(IconText("\uE777", 16));
-        var creditExpiry = Text(ResetCreditExpiry(row.Usage, compact: true), 14, muted: true); creditExpiry.TextWrapping = TextWrapping.Wrap;
-        if (row.Usage?.ResetCreditsExpireAt is { } expires) creditExpiry.ToolTip = expires.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-        Grid.SetColumn(creditExpiry, 1); creditLine.Children.Add(creditExpiry); metadata.Children.Add(creditLine);
+        var creditLine = ResetCreditExpiryLine(row.Usage, compact: true); creditLine.Margin = new Thickness(0, 8, 0, 10); metadata.Children.Add(creditLine);
         metadata.Children.Add(Rule()); Grid.SetRow(metadata, 2); card.Children.Add(metadata);
         var actions = new AccountActionsPanel { Margin = new Thickness(0, 12, 0, 0) };
         var accountActions = new StackPanel { Orientation = Orientation.Horizontal };
@@ -356,7 +377,7 @@ public sealed class MainWindow : Window
         reset.IsEnabled &= !State.IsAddingAccount && row.Usage?.ResetCreditsRemaining > 0; reset.Margin = new Thickness(10, 0, 0, 0);
         reset.ToolTip = row.Usage?.ResetCreditsRemaining switch { null => L("可用重置次数未知，请先刷新。", "Reset credits are unknown; refresh first."), <= 0 => L("没有可用重置次数。", "No reset credits available."), _ => L("确认后消耗 1 次重置机会。", "Confirm to use one reset credit.") };
         AutomationProperties.SetName(reset, L("重置额度", "Reset quota")); accountActions.Children.Add(reset);
-        var refresh = Button("", () => _ = Run("refresh", row.Profile.Id), "\uE72C"); refresh.IsEnabled &= !State.IsAddingAccount;
+        var refresh = RefreshButton("", row.Profile.Id);
         refresh.ToolTip = L("刷新此账号", "Refresh this account"); AutomationProperties.SetName(refresh, L("刷新此账号", "Refresh this account")); utilityActions.Children.Add(refresh);
         var remove = Button("", () => { if (!active) StartConfirmation(row, "remove"); }, "\uE74D"); remove.Margin = new Thickness(8, 0, 0, 0);
         remove.IsEnabled &= !active && !State.IsAddingAccount; remove.ToolTip = active ? L("不能删除当前使用的账号", "Cannot delete the current account") : L("删除此账号", "Delete this account");
@@ -394,9 +415,21 @@ public sealed class MainWindow : Window
         schedule.ToolTip = scheduleTip; Grid.SetRow(schedule, 2); grid.Children.Add(schedule);
         return grid;
     }
-    private string ResetCreditExpiry(Usage? usage, bool compact = false) => usage?.ResetCreditsExpireAt is { } expiry
-        ? L(compact ? "重置机会最早到期 " : "重置机会最早到期：", "Earliest reset credit expiry: ") + expiry.ToLocalTime().ToString("MM-dd HH:mm")
-        : L("重置机会：暂无到期信息", "Reset credits: no expiry information");
+    private Grid ResetCreditExpiryLine(Usage? usage, bool compact = false) {
+        var currentTime = now();
+        var expiry = usage?.ResetCreditsExpireAt;
+        var tone = AccountVisuals.ResetExpiryTone(expiry, currentTime);
+        var line = new Grid();
+        line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(26) }); line.ColumnDefinitions.Add(new ColumnDefinition());
+        AutomationProperties.SetName(line, L("重置机会到期", "Reset credit expiry"));
+        var icon = IconText("\uE777", 16); icon.SetResourceReference(TextBlock.ForegroundProperty, tone); line.Children.Add(icon);
+        var label = Text(AccountVisuals.ResetExpiryLabel(expiry, currentTime, Chinese, compact), 14, bold: tone is "Warning" or "Danger");
+        label.SetResourceReference(TextBlock.ForegroundProperty, tone);
+        label.TextWrapping = TextWrapping.Wrap; label.TextTrimming = TextTrimming.None;
+        if (expiry is { } time) label.ToolTip = time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+        Grid.SetColumn(label, 1); line.Children.Add(label);
+        return line;
+    }
     private string ResetSchedule(Usage usage) => (usage.FiveHourRemainingPercent.HasValue
         ? L("5 小时 ", "5h ") + (usage.FiveHourResetsAt?.ToLocalTime().ToString("MM-dd HH:mm") ?? T("unknown")) + "  ·  " : "") +
         L("7 天 ", "7d ") + usage.ResetsAt.ToLocalTime().ToString("MM-dd HH:mm");
@@ -412,7 +445,7 @@ public sealed class MainWindow : Window
             content.Children.Add(Rule());
             var credits = Text(L("可用重置次数：", "Available reset credits: ") + (usage.ResetCreditsRemaining?.ToString(CultureInfo.CurrentCulture) ?? T("unknown")), 16, bold: true);
             credits.Margin = new Thickness(0, 16, 0, 0); content.Children.Add(credits);
-            var expiry = Text(ResetCreditExpiry(usage), 14, muted: true); expiry.TextWrapping = TextWrapping.Wrap; expiry.Margin = new Thickness(0, 10, 0, 0); content.Children.Add(expiry);
+            var expiry = ResetCreditExpiryLine(usage); expiry.Margin = new Thickness(0, 10, 0, 0); content.Children.Add(expiry);
             var renewal = Text(L("额度自动恢复：", "Automatic quota renewal: ") + ResetSchedule(usage), 14, muted: true); renewal.TextWrapping = TextWrapping.Wrap;
             renewal.Margin = new Thickness(0, 8, 0, 0); content.Children.Add(renewal);
         }
@@ -511,6 +544,9 @@ public sealed class MainWindow : Window
         }, "\uE8B7"); log.HorizontalAlignment = HorizontalAlignment.Left; log.Margin = new Thickness(34, 0, 0, 4); automation.Children.Add(log);
         var updates = Section(L("更新", "Updates"));
         Row(updates, T("automatically_check_updates"), "\uE72C", Toggle(T("automatically_check_updates"), native.AutomaticallyCheckUpdates, value => native.AutomaticallyCheckUpdates = value));
+        var checkSchedule = Text(L("启用后启动时检查一次，此后每 60 分钟检查；同一版本本次运行仅自动提醒一次。",
+            "When enabled, check at startup and every 60 minutes. Each version is prompted automatically only once per run."), 13, muted: true);
+        checkSchedule.TextWrapping = TextWrapping.Wrap; checkSchedule.Margin = new Thickness(0, 0, 0, 14); updates.Children.Add(checkSchedule);
         var status = native.InstallStatus ?? native.UpdateError ?? (native.IsChecking ? L("正在检查更新…", "Checking for updates…")
             : native.AvailableUpdate is { } release ? L($"发现新版本 {NativeSettings.FormatVersion(release.Version)}", $"Version {NativeSettings.FormatVersion(release.Version)} is available")
             : native.HasChecked ? L("当前已是最新版本。", "You are up to date.")

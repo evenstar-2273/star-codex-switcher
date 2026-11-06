@@ -204,7 +204,7 @@ public partial class App : Application
             ("SectionHeader", dark ? "#1C304B" : "#E4EDF9"), ("ButtonSurface", dark ? "#20334C" : "#F4F7FC"), ("InputSurface", dark ? "#132238" : "#F7FAFF"),
             ("Muted", dark ? "#ABBBD0" : "#5E6F86"), ("Schedule", dark ? "#CBDDF5" : "#344B6A"), ("Line", dark ? "#31465F" : "#CBD7E8"), ("Track", dark ? "#405169" : "#D6DFEB"),
             ("Hover", dark ? "#263E5B" : "#E2ECFA"),
-            ("Success", dark ? "#61DD81" : "#138A3F"), ("Warning", dark ? "#F3B94C" : "#9B5C00"), ("WarningSurface", dark ? "#3B3020" : "#FFF4D9"),
+            ("Success", dark ? "#61DD81" : "#117B38"), ("Warning", dark ? "#F3B94C" : "#9B5C00"), ("WarningSurface", dark ? "#3B3020" : "#FFF4D9"),
             ("Danger", dark ? "#FF777F" : "#C63943"), ("OnAccent", "#FFFFFF") })
             Resources[pair.Item1] = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(pair.Item2));
         ApplyAccent(dark);

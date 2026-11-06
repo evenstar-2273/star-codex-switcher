@@ -35,7 +35,7 @@ $setup=Join-Path $OutputDirectory ("Star-Codex-Switcher-$releaseVersion-Setup-x6
 if($LASTEXITCODE -ne 0){throw 'NSIS build failed'}
 $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($setup+'.sha256',"$hash  $([IO.Path]::GetFileName($setup))`n",[Text.UTF8Encoding]::new($false))
-$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：首页以蒙层和居中弹窗展示更新内容与更新进度，可跳过当前版本、暂不更新或更新并重启；跳过版本的选择会保存，下一个新版仍提醒；暂不更新仅本次运行不重复，重启可再提示；手动检查可安装已跳过版本，后台或忙碌时延后提醒；修复订阅有效期取值优先级，保留尚未到期的登录订阅期末，缺失或过期后再在线查询；安装保留账号和设置。"}
+$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：重置机会最早到期按绿、橙、红三级提醒，3天内加粗，时间与图标同步着色，卡片和确认窗一致；手动全量刷新旋转全部刷新图标，单卡刷新只旋转对应图标，任务完成或失败后停止，防止重复请求并保持滚动位置；设置中标明启动及每 60 分钟的更新检查周期，升级保留账号和设置。"}
 [IO.File]::WriteAllText((Join-Path $OutputDirectory 'update-installed.json'),($feed|ConvertTo-Json)+"`n",[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $projectRoot 'windows\artifacts\latest-installed-build.txt'),$publish)
 Write-Output $setup

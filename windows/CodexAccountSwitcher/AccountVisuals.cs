@@ -56,6 +56,21 @@ public static class AccountVisuals
         _ => "Success"
     };
 
+    public static string ResetExpiryTone(DateTimeOffset? until, DateTimeOffset now) => until switch {
+        null => "Muted",
+        { } date when date - now <= TimeSpan.FromHours(24) => "Danger",
+        { } date when date - now <= TimeSpan.FromDays(3) => "Warning",
+        _ => "Success"
+    };
+
+    public static string ResetExpiryLabel(DateTimeOffset? until, DateTimeOffset now, bool chinese, bool compact = false)
+    {
+        if (until is not { } expiry) return chinese ? "重置机会：暂无到期信息" : "Reset credits: no expiry information";
+        var prefix = chinese ? (compact ? "重置机会最早到期 " : "重置机会最早到期：") : "Earliest reset credit expiry: ";
+        var suffix = expiry <= now ? (chinese ? "（已到期，待刷新）" : " (Expiry reached; refresh to confirm)") : "";
+        return prefix + expiry.ToLocalTime().ToString("MM-dd HH:mm") + suffix;
+    }
+
     public static string ExpiryRemaining(DateTimeOffset until, DateTimeOffset now, bool chinese)
     {
         var remaining = until - now;

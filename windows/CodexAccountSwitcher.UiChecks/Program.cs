@@ -227,6 +227,7 @@ internal static class Program
             window.Close();
             Assert(!window.IsVisible && !closed, "An active operation can continue while the window is hidden.");
             client.State = client.State with { IsMutating = false };
+            RefreshResetChecks.Run(app, Path.Combine(output, "refresh-reset"), native);
             UpdatePromptChecks.Run(app, Path.Combine(output, "update-prompts"), native);
             window.CloseForExit();
             Assert(closed, "Explicit application exit must release the window.");
