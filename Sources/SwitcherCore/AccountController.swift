@@ -17,6 +17,7 @@ open class AccountController {
     public private(set) var isAddingAccount = false { didSet { onChange?() } }
     public var visibleError: OperationError? { didSet { onChange?() } }
     public private(set) var activeIdentityConfirmed = true { didSet { onChange?() } }
+    public private(set) var usageRefreshRevision: UInt64 = 0 { didSet { onChange?() } }
 
     private let store: AccountStore
     private let codex: any AccountClient
@@ -25,7 +26,8 @@ open class AccountController {
     private var usageRefreshTask: Task<Void, Never>?
     private var nextUsageRefreshTask: Task<Void, Never>?
     private var addAccountTask: Task<Void, Never>?
-    private var backgroundUsageRefreshInterval: Duration = .seconds(300)
+    private var backgroundUsageRefreshIntervalOverride: Duration?
+    private let usageRefreshSleep: @Sendable (Duration) async throws -> Void
     private var isBackgroundUsageRefreshEnabled = false
     private var autoReset: AutoReset?
     private var resetExpiryTask: Task<Void, Never>?
@@ -35,11 +37,13 @@ open class AccountController {
     public init(
         store: AccountStore,
         codex: any AccountClient,
-        switchService: any SwitchServicing
+        switchService: any SwitchServicing,
+        usageRefreshSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         self.store = store
         self.codex = codex
         self.switchService = switchService
+        self.usageRefreshSleep = usageRefreshSleep
     }
 
     public func text(_ key: String) -> String {
@@ -85,10 +89,11 @@ open class AccountController {
         if isBackgroundUsageRefreshEnabled {
             scheduleNextWeeklyUsageRefresh()
         }
-        guard !isMutating, usageRefreshTask == nil else { return }
+        guard !isMutating, !isAddingAccount, usageRefreshTask == nil else { return }
         usageRefreshTask = Task { [weak self] in
             guard let self else { return }
             await self.performWeeklyUsageRefresh()
+            if !Task.isCancelled && self.usageRefreshRevision < UInt64.max { self.usageRefreshRevision += 1 }
             self.usageRefreshTask = nil
             self.scheduleResetExpiryCheck()
         }
@@ -110,8 +115,9 @@ open class AccountController {
         subscriptionSnapshots = snapshots
     }
 
-    public func startBackgroundUsageRefresh(every interval: Duration = .seconds(300)) async {
-        backgroundUsageRefreshInterval = interval
+    public func startBackgroundUsageRefresh(every interval: Duration? = nil) async {
+        guard !isBackgroundUsageRefreshEnabled else { return }
+        backgroundUsageRefreshIntervalOverride = interval
         isBackgroundUsageRefreshEnabled = true
         await start()
         refreshWeeklyUsage()
@@ -127,10 +133,12 @@ open class AccountController {
 
     private func scheduleNextWeeklyUsageRefresh() {
         nextUsageRefreshTask?.cancel()
-        let interval = backgroundUsageRefreshInterval
-        nextUsageRefreshTask = Task { [weak self] in
+        nextUsageRefreshTask = nil
+        guard isBackgroundUsageRefreshEnabled, settings.quotaRefreshIntervalMinutes > 0 else { return }
+        let interval = backgroundUsageRefreshIntervalOverride ?? .seconds(settings.quotaRefreshIntervalMinutes * 60)
+        nextUsageRefreshTask = Task { [weak self, usageRefreshSleep] in
             do {
-                try await Task.sleep(for: interval)
+                try await usageRefreshSleep(interval)
             } catch {
                 return
             }
@@ -236,6 +244,7 @@ open class AccountController {
             defer {
                 self.isAddingAccount = false
                 self.addAccountTask = nil
+                self.scheduleResetExpiryCheck()
             }
             await self.performAddAccount()
         }
@@ -366,6 +375,17 @@ open class AccountController {
         } catch {
             stopAutoReset(error)
         }
+    }
+
+    public func setQuotaRefreshIntervalMinutes(_ minutes: Int) async throws {
+        try AppSettings.validateQuotaRefreshInterval(minutes)
+        guard settings.quotaRefreshIntervalMinutes != minutes else { return }
+        var updated = settings
+        updated.quotaRefreshIntervalMinutes = minutes
+        try await store.saveSettings(updated)
+        settings = updated
+        // This setting controls only ordinary polling; reset deadlines remain independent.
+        scheduleNextWeeklyUsageRefresh()
     }
 
     private func beginAutoReset(event: String) async throws {

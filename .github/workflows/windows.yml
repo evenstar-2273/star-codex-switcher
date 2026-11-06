@@ -42,7 +42,7 @@ jobs:
       - name: Check cancellable authorization
         shell: pwsh
         run: |
-          swift test --filter AccountCancellationTests
+          swift test --filter 'AccountCancellationTests|AccountControllerTests|QuotaRefreshSettingsTests'
           if ($LASTEXITCODE -ne 0) { throw 'Swift cancellation checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- login-cancel ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Authorization cancellation checks failed.' }
@@ -57,6 +57,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Reset credit checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- subscriptions
           if ($LASTEXITCODE -ne 0) { throw 'Subscription checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- quota-refresh ./windows/artifacts/installer-runtime/SwitcherHost.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Quota refresh scheduling checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- quota-network
+          if ($LASTEXITCODE -ne 0) { throw 'Quota network error checks failed.' }
       - name: Check WPF with synthetic accounts
         shell: pwsh
         run: |

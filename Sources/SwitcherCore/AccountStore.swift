@@ -134,6 +134,7 @@ public actor AccountStore: AccountStoring {
     }
 
     public func saveSettings(_ settings: AppSettings) throws {
+        try AppSettings.validateQuotaRefreshInterval(settings.quotaRefreshIntervalMinutes)
         try prepareDirectories()
         try writeJSON(settings, to: settingsURL)
     }

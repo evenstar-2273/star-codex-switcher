@@ -27,7 +27,8 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private readonly bool directUsageEnabled;
     private readonly CancellationTokenSource usageLifetime = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (Usage? Usage, string? Error, DateTimeOffset At, bool UnknownCredits)> directUsage = new();
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, Task> usageTasks = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, long> usageRevisions = new();
+    private Task? automaticUsageTask;
     private readonly SynchronizationContext context = SynchronizationContext.Current ?? new SynchronizationContext();
     private int usageGeneration;
     private readonly object usageStateLock = new();
@@ -69,20 +70,36 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         DetectChangedCredentials();
         Changed?.Invoke();
         if (!directUsageEnabled || usageLifetime.IsCancellationRequested || busy || cancellingLogin || activeCommand == "add" || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount) return;
-        foreach (var row in core.State.Accounts) {
-            var id = row.Profile.Id;
-            if (resetNeedsRefresh.ContainsKey(id)) continue;
-            if (directUsage.TryGetValue(id, out var entry) && DateTimeOffset.UtcNow - entry.At < TimeSpan.FromMinutes(5)) continue;
+        // The host owns the only periodic clock. A fresh revision, rather than
+        // a second cache-age timer, means its configured interval is respected.
+        // Startup reads also cover the first host cycle, which can finish later.
+        if (!commands.Wait(0)) return;
+        var handedOff = false;
+        try {
+            if (usageLifetime.IsCancellationRequested || cancellingLogin || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount) return;
+            var revision = Math.Max(1, core.State.UsageRefreshRevision);
+            var ids = core.State.Accounts.Select(row => row.Profile.Id).Where(id => !resetNeedsRefresh.ContainsKey(id) &&
+                (!directUsage.ContainsKey(id) || !usageRevisions.TryGetValue(id, out var consumed) || consumed < revision)).ToArray();
+            if (ids.Length == 0) return;
             var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (usageTasks.TryAdd(id, completion.Task)) _ = ReadDirectUsageAsync(id, Volatile.Read(ref usageGeneration), completion);
-        }
+            automaticUsageTask = completion.Task; activeCommand = "automaticQuotaRefresh"; busy = true; handedOff = true;
+            _ = ReadAutomaticUsageAsync(ids, revision, Volatile.Read(ref usageGeneration), completion);
+        } finally { if (!handedOff) commands.Release(); }
     }
-    private async Task ReadDirectUsageAsync(Guid id, int generation, TaskCompletionSource completion) {
-        try { await RefreshDirectUsageAsync(id, generation); }
+    private async Task ReadAutomaticUsageAsync(Guid[] ids, long revision, int generation, TaskCompletionSource completion) {
+        try {
+            Notify();
+            await Task.WhenAll(ids.Select(id => ReadRevisionAsync(id, revision, generation)));
+        }
         finally {
-            usageTasks.TryRemove(id, out _); completion.TrySetResult();
+            busy = false; activeCommand = null; commands.Release(); completion.TrySetResult();
             if (!usageLifetime.IsCancellationRequested) context.Post(_ => Notify(), null);
         }
+    }
+    private async Task ReadRevisionAsync(Guid id, long revision, int generation, bool reconcileReset = false) {
+        await RefreshDirectUsageAsync(id, generation, reconcileReset: reconcileReset);
+        // Failed reads count too: duplicate snapshots must not form a retry loop.
+        lock (usageStateLock) { if (generation == usageGeneration) usageRevisions[id] = revision; }
     }
     private async Task<string?> RefreshDirectUsageAsync(Guid id, int generation, bool afterReset = false, bool reconcileReset = false) {
         var entered = false;
@@ -104,7 +121,9 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             Usage? fresh = null; string? failure = null; var creditsConfirmed = false;
             try { fresh = await usageReader(credential, usageLifetime.Token); }
             catch (OperationCanceledException) when (usageLifetime.IsCancellationRequested) { throw; }
-            catch { failure = "读取额度失败，请检查网络或重新授权后刷新。"; }
+            catch (QuotaReadException ex) { failure = ex.Message; }
+            catch { failure = "读取额度失败，请检查网络后重试。"; }
+            fresh ??= directUsage.GetValueOrDefault(id).Usage ?? State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage;
             try {
                 var credits = await resetCredits.ReadAsync(credential, usageLifetime.Token);
                 creditsConfirmed = credits.AvailableCount.HasValue;
@@ -166,7 +185,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         snapshot is { Source: "login_snapshot" } login && login.ActiveUntil <= now || now - cachedAt >= TimeSpan.FromMinutes(30);
     private int AdvanceUsageGeneration(bool clear = false) {
         lock (usageStateLock) {
-            if (clear) { directUsage.Clear(); planHints.Clear(); credentialFingerprints.Clear(); subscriptions.Clear(); }
+            if (clear) { directUsage.Clear(); usageRevisions.Clear(); planHints.Clear(); credentialFingerprints.Clear(); subscriptions.Clear(); }
             return ++usageGeneration;
         }
     }
@@ -186,7 +205,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             lock (usageStateLock) {
                 if (credentialFingerprints.TryGetValue(id, out var latest) && latest == observed) {
                     ++usageGeneration;
-                    credentialFingerprints.TryRemove(id, out _); planHints.TryRemove(id, out _); directUsage.TryRemove(id, out _); subscriptions.TryRemove(id, out _);
+                    credentialFingerprints.TryRemove(id, out _); planHints.TryRemove(id, out _); directUsage.TryRemove(id, out _); usageRevisions.TryRemove(id, out _); subscriptions.TryRemove(id, out _);
                 }
             }
         }
@@ -225,6 +244,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     public async Task InitializeAsync()
     {
         var runtime = runtimeFactory();
+        usageRevisions.Clear();
         core = runtime; initialized = false; runtime.Changed += Notify;
         try { await runtime.InitializeAsync(); initialized = true; Notify(); }
         catch { runtime.Changed -= Notify; await runtime.DisposeAsync(); if (core == runtime) core = null; throw; }
@@ -274,11 +294,16 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
 
     public async Task CommandAsync(string command, Guid? accountID = null, bool? value = null, string? language = null)
     {
+        var intervalSetting = command == "quotaRefreshInterval";
+        if (intervalSetting && (!int.TryParse(language, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var minutes) || minutes is < 0 or > 1440))
+            throw new IOException("刷新间隔须为 1–1440 的整数分钟；禁用请选择禁用选项。");
         // Cancellation must reach the login even when its start acknowledgement
         // or another ordinary command is still waiting on the shared transport.
         if (command == "cancelAdd") { await CancelAddingAccountAsync(); return; }
-        if (cancellingLogin) return;
-        if (!await commands.WaitAsync(0)) return;
+        if (cancellingLogin || !await commands.WaitAsync(0)) {
+            if (intervalSetting) throw new IOException("请等待当前账号操作完成后再保存刷新间隔。");
+            return;
+        }
         activeCommand = command;
         try {
             if (core == null) throw new IOException("Account core is unavailable. Restart the app.");
@@ -288,19 +313,19 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             if (command == "refresh" && directUsageEnabled) {
                 if (core.State.IsMutating || core.State.IsAddingAccount) return;
                 busy = true; error = null; Notify();
-                // The shared refresh also synchronizes the active login and subscription snapshots.
-                // Its quota task continues asynchronously after the transport command completes.
+                // The host acknowledges only after its refresh cycle finishes.
                 await core.CommandAsync("refresh", accountID);
                 var generation = AdvanceUsageGeneration();
+                var revision = Math.Max(1, core.State.UsageRefreshRevision);
                 var ids = State.Accounts.Where(row => accountID == null || row.Profile.Id == accountID).Select(row => row.Profile.Id).ToArray();
-                await Task.WhenAll(ids.Select(id => RefreshDirectUsageAsync(id, generation, reconcileReset: true)));
+                await Task.WhenAll(ids.Select(id => ReadRevisionAsync(id, revision, generation, reconcileReset: true)));
                 return;
             }
             if (command != "switch") {
                 if (command == "refresh") foreach (var entry in directUsage.Where(x => x.Value.Usage == null).ToArray()) directUsage.TryRemove(entry.Key, out _);
                 try { await core.CommandAsync(command, accountID, value, language); }
                 catch when (command == "add" && cancellingLogin) { return; }
-                if (command == "remove" && accountID is { } removed) { AdvanceUsageGeneration(); directUsage.TryRemove(removed, out _); planHints.TryRemove(removed, out _); credentialFingerprints.TryRemove(removed, out _); resetNeedsRefresh.TryRemove(removed, out _); subscriptions.TryRemove(removed, out _); }
+                if (command == "remove" && accountID is { } removed) { AdvanceUsageGeneration(); directUsage.TryRemove(removed, out _); usageRevisions.TryRemove(removed, out _); planHints.TryRemove(removed, out _); credentialFingerprints.TryRemove(removed, out _); resetNeedsRefresh.TryRemove(removed, out _); subscriptions.TryRemove(removed, out _); }
                 return;
             }
             if (accountID == null || core.State.IsMutating || core.State.IsAddingAccount) return;
@@ -382,7 +407,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     public Task OpenAsync(CancellationToken ct) => transaction?.OpenAsync(ct)
         ?? Task.FromException(new IOException("A validated switch is required."));
     public async ValueTask DisposeAsync() {
-        usageLifetime.Cancel(); await Task.WhenAll(usageTasks.Values.ToArray());
+        usageLifetime.Cancel(); if (automaticUsageTask is { } automatic) await automatic;
         // A pending add can own commands until the host stops. Cancel it first;
         // taking that gate before stopping the login would deadlock shutdown.
         await CancelAddingAccountAsync();

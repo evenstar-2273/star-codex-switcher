@@ -35,6 +35,7 @@ public sealed class MainWindow : Window
     private int renderedLayout;
     private AdaptiveCardGrid? accountGrid;
     private RefreshRotation? refreshRotation;
+    private QuotaRefreshSelector? quotaRefreshSelector;
     private bool layoutPending, closingForExit;
     public bool IsBusy => refreshRotation != null || client.State.IsMutating || native.IsInstalling;
     public string CurrentPage => page;
@@ -176,8 +177,15 @@ public sealed class MainWindow : Window
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(OnClientChanged)); return; }
         updateDialog?.RefreshState();
-        if (page == "settings" && renderedState is { } previous && previous.Settings == State.Settings &&
-            previous.IsMutating == State.IsMutating && previous.IsAddingAccount == State.IsAddingAccount && previous.Error == State.Error) return;
+        if (page == "settings" && renderedState is { } previous &&
+            previous.Settings with { QuotaRefreshIntervalMinutes = State.Settings.QuotaRefreshIntervalMinutes } == State.Settings &&
+            previous.IsMutating == State.IsMutating && previous.IsAddingAccount == State.IsAddingAccount && previous.Error == State.Error) {
+            // Saving on blur must not remove the control that is receiving focus.
+            // This setting has its own stable editor and can update in place.
+            if (previous.Settings.QuotaRefreshIntervalMinutes != State.Settings.QuotaRefreshIntervalMinutes)
+                quotaRefreshSelector?.UpdateState(State.Settings.QuotaRefreshIntervalMinutes, Chinese, !IsBusy && !State.IsAddingAccount);
+            renderedState = State; return;
+        }
         Render();
     }
 
@@ -191,6 +199,7 @@ public sealed class MainWindow : Window
             if (target == null) page = "accounts";
         }
         var offset = renderedPage == page ? pendingScrollOffset ?? scroll.VerticalOffset : 0;
+        if (page == "settings") quotaRefreshSelector?.PrepareForReparent();
         pendingScrollOffset = offset; renderedPage = page; renderedState = State;
         var generation = ++renderGeneration;
         renderedLayout = LayoutKey;
@@ -237,7 +246,8 @@ public sealed class MainWindow : Window
         scroll.ScrollToVerticalOffset(offset);
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => {
             if (generation != renderGeneration) return;
-            scroll.UpdateLayout(); scroll.ScrollToVerticalOffset(offset); pendingScrollOffset = null;
+            scroll.UpdateLayout(); quotaRefreshSelector?.FinishReparent(page == "settings");
+            scroll.ScrollToVerticalOffset(offset); pendingScrollOffset = null;
         }));
         EvaluateUpdatePrompt();
     }
@@ -268,7 +278,8 @@ public sealed class MainWindow : Window
         if (!State.ActiveIdentityConfirmed) { var warning = Text(T("active_unconfirmed"), 14, muted: true); warning.TextWrapping = TextWrapping.Wrap; warning.Margin = new Thickness(0, 0, 0, 16); body.Children.Add(warning); }
         var list = new AdaptiveCardGrid { Margin = new Thickness(-8, -8, -8, 0) };
         accountGrid = list;
-        foreach (var row in State.Accounts) list.Children.Add(AccountItem(row));
+        var activeAccountId = State.ActiveAccountID;
+        foreach (var row in State.Accounts.OrderByDescending(row => row.Profile.Id == activeAccountId)) list.Children.Add(AccountItem(row));
         if (State.Accounts.Length == 0) {
             var empty = Text(T("no_accounts"), 17, muted: true); empty.Margin = new Thickness(24, 54, 24, 54); empty.TextWrapping = TextWrapping.Wrap; body.Children.Add(Box(empty));
         } else body.Children.Add(list);
@@ -325,13 +336,17 @@ public sealed class MainWindow : Window
         if (row.Usage is { } usage) {
             if (usage.FiveHourRemainingPercent.HasValue) quotas.Children.Add(UsageLine(L("5 小时剩余", "5 hours left"), usage.FiveHourRemainingPercent, usage.FiveHourResetsAt, false));
             quotas.Children.Add(UsageLine(L("7 天剩余", "7 days left"), usage.RemainingPercent, usage.ResetsAt, true));
-            if (row.UsageError != null) {
-                var stale = Text(L("刷新未完成，显示上次额度", "Refresh failed; showing previous quota"), 12, muted: true);
-                stale.ToolTip = WindowsLocalization.Error(row.UsageError, State.Settings.Language); stale.Margin = new Thickness(0, 4, 0, 0); quotas.Children.Add(stale);
-            }
         } else {
-            var missing = Text(row.UsageStatus == "idle" ? L("额度读取中…", "Loading quota…") : T("usage_unavailable"), 15, muted: true);
+            var missing = Text(row.UsageStatus == "idle" && string.IsNullOrWhiteSpace(row.UsageError) ? L("额度读取中…", "Loading quota…") : T("usage_unavailable"), 15, muted: true);
             missing.ToolTip = WindowsLocalization.Error(row.UsageError, State.Settings.Language); missing.TextWrapping = TextWrapping.Wrap; quotas.Children.Add(missing);
+        }
+        if (!string.IsNullOrWhiteSpace(row.UsageError)) {
+            var failure = Text(row.Usage != null ? L("刷新失败，显示上次额度", "Refresh failed; showing previous quota") : L("刷新失败", "Refresh failed"), 13, bold: true);
+            failure.SetResourceReference(TextBlock.ForegroundProperty, "Warning"); failure.TextWrapping = TextWrapping.Wrap;
+            failure.TextTrimming = TextTrimming.None; failure.Margin = new Thickness(0, 4, 0, 0); quotas.Children.Add(failure);
+            var reason = Text(WindowsLocalization.Error(row.UsageError, State.Settings.Language), 13, muted: true);
+            reason.TextWrapping = TextWrapping.Wrap; reason.TextTrimming = TextTrimming.None; reason.Margin = new Thickness(0, 4, 0, 0);
+            reason.ToolTip = reason.Text; AutomationProperties.SetName(reason, L("额度刷新失败原因", "Quota refresh error")); quotas.Children.Add(reason);
         }
         Grid.SetRow(quotas, 1); card.Children.Add(quotas);
         var metadata = new StackPanel(); metadata.Children.Add(Rule());
@@ -534,6 +549,13 @@ public sealed class MainWindow : Window
             Math.Max(0, Array.IndexOf(languages, State.Settings.Language)), index => _ = Run("language", language: languages[index])));
         var trayHint = Text(L("关闭窗口后保留在托盘。账号支持 5 小时额度时会自动显示。", "Closing the window keeps the app in the tray. Five-hour quota appears when supported."), 13, muted: true);
         trayHint.TextWrapping = TextWrapping.Wrap; trayHint.Margin = new Thickness(0, 8, 0, 4); general.Children.Add(trayHint);
+        var quotaRefresh = Section(L("额度刷新", "Quota refresh"));
+        quotaRefreshSelector ??= new QuotaRefreshSelector(State.Settings.QuotaRefreshIntervalMinutes, Chinese,
+            minutes => client.CommandAsync("quotaRefreshInterval", language: minutes.ToString(CultureInfo.InvariantCulture)));
+        quotaRefreshSelector.UpdateState(State.Settings.QuotaRefreshIntervalMinutes, Chinese, !IsBusy && !State.IsAddingAccount);
+        Row(quotaRefresh, L("刷新间隔", "Refresh interval"), "\uE72C", quotaRefreshSelector,
+            L("禁用仅停止定时刷新，不影响手动刷新。应用驻留托盘时仍会定时刷新，电脑需保持唤醒。自定义范围为 1–1440 分钟，按 Enter 或移开焦点保存。",
+                "Disabling stops scheduled refreshes only; manual refresh remains available. Scheduled refreshes continue in the tray while the computer is awake. Custom: 1–1440 minutes; press Enter or move focus to save."));
         var automation = Section(L("自动重置", "Automatic reset"));
         Row(automation, T("auto_reset"), "\uE777", Toggle(T("auto_reset"), State.Settings.AutoResetEnabled, value => _ = Run("autoReset", value: value)), T("auto_reset_hint"));
         var log = Button(T("open_reset_log"), () => {

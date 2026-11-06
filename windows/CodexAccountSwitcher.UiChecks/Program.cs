@@ -17,6 +17,13 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length >= 1 && args[0] == "--test-quota-refresh") {
+            try {
+                var app = new App(false); app.InitializeComponent(); app.ApplyPalette(false);
+                QuotaRefreshChecks.Run(app, Path.GetFullPath(args.ElementAtOrDefault(1) ?? "windows/artifacts/quota-refresh"),
+                    new NativeSettings(@"Software\StarCodexSwitcher.UiChecks\QuotaRefresh-Restore")); return 0;
+            } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
         if (args.Length == 4 && args[0] == "--test-update-prompt-child") {
             try { return UpdatePromptChecks.RunChild(args[1], args[2], args[3] == "yes"); }
             catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
@@ -228,6 +235,7 @@ internal static class Program
             Assert(!window.IsVisible && !closed, "An active operation can continue while the window is hidden.");
             client.State = client.State with { IsMutating = false };
             RefreshResetChecks.Run(app, Path.Combine(output, "refresh-reset"), native);
+            QuotaRefreshChecks.Run(app, Path.Combine(output, "quota-refresh"), native);
             UpdatePromptChecks.Run(app, Path.Combine(output, "update-prompts"), native);
             window.CloseForExit();
             Assert(closed, "Explicit application exit must release the window.");

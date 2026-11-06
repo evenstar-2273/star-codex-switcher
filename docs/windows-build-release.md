@@ -42,25 +42,27 @@ $nsisPath = (Get-Command makensis).Source
 ./scripts/package-installed.ps1 -SwiftRuntimeDirectory ./windows/artifacts/installer-runtime -Dotnet $dotnetPath -Makensis $nsisPath -OutputDirectory ./windows/artifacts/release
 ```
 
-当前版本为 `1.0.4`，后续从 `1.0.5` 递增。内部 `FileVersion` 使用四段形式（如 `1.0.4.0`），文件名和 Release tag 使用三段形式（如 `v1.0.4`）。可以通过 `-ReleaseTag` 显式指定；必须与实际 GitHub Release tag 完全一致。
+当前版本为 `1.0.5`，后续从 `1.0.6` 递增。内部 `FileVersion` 使用四段形式（如 `1.0.5.0`），文件名和 Release tag 使用三段形式（如 `v1.0.5`）。可以通过 `-ReleaseTag` 显式指定；必须与实际 GitHub Release tag 完全一致。
 
-1.0.4 的交付名称如下；仓库地址中的 `star-codex-switcher` 保持不变：
+1.0.5 的交付名称如下；仓库地址中的 `star-codex-switcher` 保持不变：
 
 | 用途 | 名称 |
 | --- | --- |
 | 显示标题、快捷方式、安装显示名 | `Star Codex Switcher` |
-| 安装包 | `Star-Codex-Switcher-1.0.4-Setup-x64.exe` |
+| 安装包 | `Star-Codex-Switcher-1.0.5-Setup-x64.exe` |
 | 安装后的主程序 | `StarCodexSwitcher.exe` |
 | 开发/打包中间应用 | `Star-Codex-Switcher-windows-x64.exe` |
 | 源码下载 | GitHub 自动提供的 `Source code (zip)` / `Source code (tar.gz)` |
-| 安装包校验文件 | `Star-Codex-Switcher-1.0.4-Setup-x64.exe.sha256` |
+| 安装包校验文件 | `Star-Codex-Switcher-1.0.5-Setup-x64.exe.sha256` |
 | 更新清单 | `update-installed.json` |
 
 安装脚本生成安装包、校验文件与更新清单。从 1.0.4 起只上传这三项 Release 资产，不再单独制作或上传源码包；源码使用 GitHub 根据对应 tag 自动提供的 Source code (zip/tar.gz)。新用户默认安装路径为 `%LOCALAPPDATA%\Programs\Star Codex Switcher`；旧用户升级沿用现有安装位置。更名时保留既有账号数据目录、登录记录和设置存储。
 
 安装包清单含安装包哈希与内置应用哈希；重新构建安装包后必须重新生成清单，不得只更换 EXE。
 
-1.0.4 的更新提示仅概括本次重置机会到期提醒与刷新动效。发布前需验证卡片和重置确认的边界：超过 3 天为绿、超过 24 小时且不超过 3 天为橙、24 小时内为红；时间和图标同步着色，3 天内加粗，未知为灰，已到期提示待刷新。手动全量刷新及打开窗口实际发起的全量刷新应使顶部和所有卡片图标旋转；单卡刷新仅影响对应图标。等待实际任务完成或失败后停止，期间阻止重复请求并保持滚动位置。普通后台读取不应被描述为每次都有旋转动效。
+1.0.5 的更新提示概括额度自动刷新设置：默认 5 分钟，禁用、2、5、10、15 分钟及自定义；自定义整数范围 1–1440 分钟，回车或失焦保存，非法输入不保存。发布前需验证即时生效、重启保留、托盘驻留有效、禁用只停止定时刷新，以及首次加载、手动刷新和自动重置继续可用；还需检查修改间隔不产生重复计时器或重叠请求。以下均为待执行的发布检查，文档更新本身不表示验证通过。
+
+继续回归卡片和重置确认的边界：超过 3 天为绿、超过 24 小时且不超过 3 天为橙、24 小时内为红；时间和图标同步着色，3 天内加粗，未知为灰，已到期提示待刷新。手动全量刷新及打开窗口实际发起的全量刷新应使顶部和所有卡片图标旋转；单卡刷新仅影响对应图标。等待实际任务完成或失败后停止，期间阻止重复请求并保持滚动位置。普通后台读取不应被描述为每次都有旋转动效。
 
 更新弹窗的“跳过版本”只跳过该版本，下一个新版仍提醒；“暂不更新”在本次运行中不重复提示；“更新并重启”保留账号。手动检查仍可查看并安装已跳过的版本，后台或忙碌时延后弹窗。发布前需回归这些行为及原有账号、设置保留，不能仅以文档已更新作为验证完成的依据。
 
@@ -79,19 +81,25 @@ $nsisPath = (Get-Command makensis).Source
 1. 先在本地完成代码和文档修改，更新版本号、`CHANGELOG.md`、软件内新版本提示与 Release 说明。提交信息说明具体变化及验证结果。
 2. 在本地编译、打包并运行相应检查；界面变化还需查看实际截图。验证失败先修复，不先提交一个尚未验证的发布版本。
 3. 在隔离 Windows 用户或测试机验证首次安装、旧安装位置升级、账号与设置保留、更新完成后启动、卸载，以及无 SDK 环境运行。使用合成或测试账号，不在发布资产中放入个人账号。
-4. 本地检查通过后正常提交源码并运行 CI，保留 1.0.0 及后续 Git 提交和 tag 历史，不重建分支历史。CI 通过后，创建与已验证构建一致的 tag（本次为 `v1.0.4`）；GitHub 会自动提供该 tag 的 Source code (zip/tar.gz)，无需另外制作源码包。
+4. 本地检查通过后正常提交源码并运行 CI，保留 1.0.0 及后续 Git 提交和 tag 历史，不重建分支历史。CI 通过后，创建与已验证构建一致的 tag（本次为 `v1.0.5`）；GitHub 会自动提供该 tag 的 Source code (zip/tar.gz)，无需另外制作源码包。
 5. 在 [GitHub Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 创建该 tag 的草稿 Release，只上传同一版本的安装包、SHA-256 文件和 `update-installed.json` 三项资产。确认资产齐全、版本和哈希匹配，再准备公开；不要先更新清单，再补尚不可下载的安装包。
-6. 将资产齐全的草稿正式发布为 Latest，保留旧版下载直至下一步核验通过。
+6. 将资产齐全的草稿正式发布为 Latest，保留已有历史版本及其下载资产。
 7. 从公网重新下载新版安装包和清单，核对 `download_url`、版本、包哈希与内置应用哈希；确认软件能检测到新版，提示文案与本次改动一致。该步骤验证公开可下载性，不能用草稿上传成功代替。
-8. 新版公开下载及更新入口验证可用后，再移除旧 Release 的下载入口和资产；保留对应 Git 提交、tag 与更新记录。若新版核验失败，先修复或恢复可用入口，不先删除线上可用版本。
+8. 新版公开下载及更新入口验证可用后，记录验证结果；不删除旧 Release、安装包或对应 Git tag，保持历史下载链接可用。若新版核验失败，先修复或停止分发新版，保留线上可用版本。
 
-本地打包交付目录与公开下载最终只保留最后一次验证通过的一组三项资产（安装包、校验文件和更新清单）。GitHub 自带的 Source code (zip/tar.gz) 入口保留。清理与发布属于实际操作，只有完成后才记录为已完成；本说明不表示旧文件已被清理。
+从 1.0.5 起，线上保留已有历史安装包，Latest 与软件更新清单指向最新验证通过的版本；服务器镜像同样使用各版本固定文件名并保留旧链接。本地打包交付目录仍按只留最后一次验证通过的三项资产（安装包、校验文件和更新清单）整理。GitHub 自带的 Source code (zip/tar.gz) 入口保留。清理与发布属于实际操作，只有完成后才记录为已完成；本说明不表示旧文件已被清理。
 
 客户端固定读取：
 
 `https://github.com/evenstar-2273/star-codex-switcher/releases/latest/download/update-installed.json`
 
 清单的安装包 URL 应固定到具体 tag，不要指向可变的 `latest` EXE。不要把低版本设置为 Latest 来代替回滚方案；遇到问题时先停止分发，修复后发布更高版本。
+
+## 自有服务器下载镜像
+
+可将同一已验证安装包及其 `.sha256` 同步到 `https://starsmsai.top/codex-switcher/`。例如本次文件名为 `Star-Codex-Switcher-1.0.5-Setup-x64.exe` 及 `Star-Codex-Switcher-1.0.5-Setup-x64.exe.sha256`；先以临时文件上传，再完成改名，随后通过公开 HTTPS 下载核对大小和 SHA-256，确认与 GitHub 交付一致后再提供地址。
+
+该目录仅提供备用下载，软件自动更新仍固定读取 GitHub 的 `update-installed.json`。镜像部署不另传源码包，源码使用 GitHub 自带的 Source code 下载。
 
 ## 公开仓库检查
 

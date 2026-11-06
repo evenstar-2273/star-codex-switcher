@@ -12,6 +12,9 @@ struct AccountCancellationTests {
         fixture.model.addAccount()
         let home = await fixture.client.waitForLogin(1)
         #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent("auth.json").path))
+        fixture.model.refreshWeeklyUsage()
+        await fixture.model.waitForWeeklyUsageRefresh()
+        #expect(fixture.model.usageRefreshRevision == 0)
 
         await fixture.model.cancelAddingAccountAndWait()
 

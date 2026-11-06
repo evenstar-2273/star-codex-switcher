@@ -147,14 +147,17 @@ internal static class SubscriptionChecks
             var lateState = state with { Accounts = [state.Accounts[0] with { Profile = state.Accounts[0].Profile with { Id = lateId } }], ActiveAccountID = lateId };
             var oldLookup = new TaskCompletionSource<SubscriptionLookup>(TaskCreationOptions.RunContinuationsAsynchronously); var lookupCalls = 0;
             var lateReader = new Reader((_, ct) => ++lookupCalls == 1 ? oldLookup.Task.WaitAsync(ct) : Task.FromResult(new SubscriptionLookup("workspace", "pro", freshUntil, "subscriptions")));
-            await using var lateClient = new GuardedAccountClient(Path.Combine(root, "data"), Path.Combine(root, "active"), () => new Runtime(lateState),
+            var lateRuntime = new Runtime(lateState);
+            await using var lateClient = new GuardedAccountClient(Path.Combine(root, "data"), Path.Combine(root, "active"), () => lateRuntime,
                 new Credits(), (_, _) => Task.FromResult(new Usage(81, Now.AddDays(4), null, null, 2, null, "prolite")), new Validator(), lateReader);
             var sawOldExpired = false;
             lateClient.Changed += () => { if (lateClient.State.Accounts.FirstOrDefault()?.Subscription?.ActiveUntil < DateTimeOffset.UtcNow) sawOldExpired = true; };
             await lateClient.InitializeAsync(); await Until(() => lookupCalls == 1);
             await lateClient.CommandAsync("refresh", lateId);
-            Require(lateClient.State.Accounts[0].Subscription?.ActiveUntil == freshUntil, "Explicit refresh supersedes an older pending billing lookup.");
-            oldLookup.SetResult(new("workspace", "pro", actualPast, "subscriptions")); await Task.Delay(30);
+            Require(lookupCalls == 1 && lateClient.State.IsMutating, "Manual refresh does not overlap an earlier pending scheduled billing lookup.");
+            File.AppendAllText(Path.Combine(lateProfile, "auth.json"), "\n"); lateRuntime.Publish(lateState);
+            oldLookup.SetResult(new("workspace", "pro", actualPast, "subscriptions"));
+            await Until(() => !lateClient.State.IsMutating && lookupCalls == 2);
             Require(!sawOldExpired && lateClient.State.Accounts[0].Subscription?.ActiveUntil == freshUntil && lateClient.State.Accounts[0].PlanType == "prolite",
                 "An old in-flight billing result cannot overwrite renewed expiry or incorrectly turn the badge free.");
         } finally { SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root); }

@@ -96,7 +96,9 @@ private final class Host {
         }
         guard let model = controller else { throw HostError.message("Initialize the host first.") }
         switch request.command {
-        case "refresh": model.refreshWeeklyUsage()
+        case "refresh":
+            model.refreshWeeklyUsage()
+            await model.waitForWeeklyUsageRefresh()
         case "add": model.addAccount()
         case "cancelAdd": await model.cancelAddingAccountAndWait()
         case "register": await model.registerCurrentAccount()
@@ -120,6 +122,12 @@ private final class Host {
         case "autoReset":
             guard let value = request.value else { throw HostError.message("Missing setting.") }
             await model.setAutoResetEnabled(value)
+        case "quotaRefreshInterval":
+            guard let raw = request.language, !raw.isEmpty,
+                  raw.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }), let minutes = Int(raw) else {
+                throw QuotaRefreshSettingsError.invalidInterval
+            }
+            try await model.setQuotaRefreshIntervalMinutes(minutes)
         case "statusBarUsageWindow":
             guard let raw = request.language, let window = StatusBarUsageWindow(rawValue: raw) else {
                 throw HostError.message("Invalid status bar usage window.")

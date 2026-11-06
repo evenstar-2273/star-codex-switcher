@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using CodexAccountSwitcher.Core;
 
 namespace CodexAccountSwitcher;
 
@@ -23,7 +24,24 @@ public static class WindowsLocalization
     [return: NotNullIfNotNull(nameof(message))]
     public static string? Error(string? message, string? language)
     {
-        if (message == null || !IsChinese(language)) return message;
+        if (message == null) return message;
+        if (!IsChinese(language)) return message switch {
+            QuotaReadException.Connection => "Cannot connect to the quota service. Check your network or VPN and retry.",
+            QuotaReadException.ProxyConnection => "Cannot reach the quota service through the proxy. Check the proxy or try another node.",
+            QuotaReadException.LocalProxyUnavailable => "Cannot connect to the local proxy. Make sure the proxy or VPN is running.",
+            QuotaReadException.Timeout => "Quota refresh timed out. Check your network or VPN and retry.",
+            QuotaReadException.ProxyTimeout => "The quota request through the proxy timed out. Check the proxy or try another node.",
+            QuotaReadException.ProxyAuthentication => "Proxy authentication failed (407). Check the proxy username and password.",
+            QuotaReadException.Unauthorized => "Sign-in credentials have expired (401). Sign in again or import valid credentials.",
+            QuotaReadException.Forbidden => "The quota request was denied (403). Check your network route or account permissions.",
+            QuotaReadException.RateLimited => "Too many requests (429). Wait before refreshing again.",
+            QuotaReadException.ServiceUnavailable => "The quota service is temporarily unavailable. Try again later.",
+            QuotaReadException.InvalidResponse => "The quota service returned an invalid response. Check your network or proxy and retry.",
+            QuotaReadException.MissingWindow => "The service has not returned a recognized quota window. Refresh again later.",
+            QuotaReadException.RequestFailed => "The quota request failed. Try again later.",
+            "读取额度失败，请检查网络后重试。" => "Quota refresh failed. Check your network and retry.",
+            _ => message
+        };
         var translated = message switch {
             "Codex did not return an account identity." => "无法读取 Codex 账号身份，请确认已完成登录，或重新导入有效的账号凭据。",
             "The account profile could not be found." => "找不到该账号的本地记录。",

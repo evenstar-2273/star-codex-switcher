@@ -122,10 +122,13 @@ struct AccountControllerTests {
         fixture.model.refreshWeeklyUsage()
         await fixture.model.waitForWeeklyUsageRefresh()
         let id = try #require(fixture.model.activeAccountID)
+        #expect(fixture.model.usageRefreshRevision == 1)
         #expect(fixture.model.usageStates[id]?.displayedUsage?.remainingPercent == 72)
         await fixture.client.failUsage()
         fixture.model.refreshWeeklyUsage()
         await fixture.model.waitForWeeklyUsageRefresh()
+        #expect(fixture.model.usageRefreshRevision == 2)
+        #expect(fixture.model.snapshot.usageRefreshRevision == 2)
         #expect(fixture.model.usageStates[id]?.displayedUsage?.remainingPercent == 72)
         #expect(fixture.model.usageStates[id]?.refreshError != nil)
         #expect(try await fixture.store.loadUsageCache().entries.first?.usage.remainingPercent == 72)
@@ -158,7 +161,129 @@ struct AccountControllerTests {
         #expect(fixture.model.activeRemainingPercent == 72)
     }
 
-    @Test func autoResetConsumesBeforeOrdinaryPollAndStopsWhenDisabled() async throws {
+    @Test func disabledQuotaPollingStillLoadsInitiallyAndAllowsManualRefresh() async throws {
+        let clock = ManualUsageClock()
+        let fixture = try ControllerFixture(usageRefreshSleep: { try await clock.sleep(for: $0) })
+        defer { fixture.model.stopBackgroundUsageRefresh(); fixture.clean() }
+        try fixture.writeActiveCredential()
+        try await fixture.store.saveSettings(AppSettings(language: .system, quotaRefreshIntervalMinutes: 0))
+        await fixture.model.startBackgroundUsageRefresh()
+        await fixture.model.waitForWeeklyUsageRefresh()
+        #expect(fixture.model.settings.quotaRefreshIntervalMinutes == 0)
+        #expect(await fixture.client.usageReads == 1)
+        #expect(fixture.model.usageRefreshRevision == 1)
+        #expect(await clock.pendingDurations.isEmpty)
+        await fixture.model.startBackgroundUsageRefresh()
+        #expect(await fixture.client.usageReads == 1)
+        fixture.model.refreshWeeklyUsage()
+        await fixture.model.waitForWeeklyUsageRefresh()
+        #expect(await fixture.client.usageReads == 2)
+        #expect(fixture.model.usageRefreshRevision == 2)
+        #expect(await clock.pendingDurations.isEmpty)
+
+        try await fixture.model.setQuotaRefreshIntervalMinutes(2)
+        try await waitForCondition { await clock.pendingDurations == [.seconds(120)] }
+        #expect(await fixture.client.usageReads == 2)
+        #expect(try await fixture.store.loadSettings().quotaRefreshIntervalMinutes == 2)
+        #expect(await clock.fireNext())
+        try await waitForCondition { fixture.model.usageRefreshRevision == 3 }
+        #expect(await fixture.client.usageReads == 3)
+        try await fixture.model.setQuotaRefreshIntervalMinutes(0)
+        try await waitForCondition { await clock.pendingDurations.isEmpty }
+        #expect(try await fixture.store.loadSettings().quotaRefreshIntervalMinutes == 0)
+        #expect(await !clock.fireNext())
+        fixture.model.refreshWeeklyUsage()
+        await fixture.model.waitForWeeklyUsageRefresh()
+        #expect(await fixture.client.usageReads == 4)
+    }
+
+    @Test func changingTheIntervalReplacesOneTimerWithoutAnImmediateRead() async throws {
+        let clock = ManualUsageClock()
+        let fixture = try ControllerFixture(usageRefreshSleep: { try await clock.sleep(for: $0) })
+        defer { fixture.model.stopBackgroundUsageRefresh(); fixture.clean() }
+        try fixture.writeActiveCredential()
+        await fixture.model.startBackgroundUsageRefresh()
+        await fixture.model.waitForWeeklyUsageRefresh()
+        try await waitForCondition { await clock.pendingDurations == [.seconds(300)] }
+        await fixture.model.startBackgroundUsageRefresh()
+        #expect(await fixture.client.usageReads == 1)
+        try await fixture.model.setQuotaRefreshIntervalMinutes(10)
+        try await waitForCondition { await clock.pendingDurations == [.seconds(600)] }
+        #expect(await fixture.client.usageReads == 1)
+        let scheduledCount = await clock.scheduledCount
+        try await fixture.model.setQuotaRefreshIntervalMinutes(10)
+        #expect(await clock.scheduledCount == scheduledCount)
+        #expect(await clock.fireNext())
+        try await waitForCondition { fixture.model.usageRefreshRevision == 2 }
+        try await waitForCondition { await clock.pendingDurations == [.seconds(600)] }
+        #expect(await fixture.client.usageReads == 2)
+        fixture.model.stopBackgroundUsageRefresh()
+        try await waitForCondition { await clock.pendingDurations.isEmpty }
+        #expect(await !clock.fireNext())
+    }
+
+    @Test func periodicAndManualRequestsCannotOverlapAnInFlightRead() async throws {
+        let clock = ManualUsageClock()
+        let fixture = try ControllerFixture(usageRefreshSleep: { try await clock.sleep(for: $0) })
+        defer { fixture.model.stopBackgroundUsageRefresh(); fixture.clean() }
+        try fixture.writeActiveCredential()
+        await fixture.model.startBackgroundUsageRefresh()
+        await fixture.model.waitForWeeklyUsageRefresh()
+        await fixture.client.holdUsageReads()
+        fixture.model.refreshWeeklyUsage()
+        try await waitForCondition { await fixture.client.usageReads == 2 }
+        try await waitForCondition { await clock.pendingDurations.count == 1 }
+        #expect(await clock.fireNext())
+        try await waitForCondition { await clock.pendingDurations.count == 1 }
+        fixture.model.refreshWeeklyUsage()
+        fixture.model.refreshWeeklyUsage()
+        #expect(await fixture.client.usageReads == 2)
+        #expect(fixture.model.usageRefreshRevision == 1)
+        await fixture.client.releaseUsageReads()
+        await fixture.model.waitForWeeklyUsageRefresh()
+        #expect(await fixture.client.maximumConcurrentUsageReads == 1)
+        #expect(fixture.model.usageRefreshRevision == 2)
+    }
+
+    @Test func failedSettingWritePreservesTheEffectiveIntervalAndTimer() async throws {
+        let clock = ManualUsageClock()
+        let fixture = try ControllerFixture(usageRefreshSleep: { try await clock.sleep(for: $0) })
+        defer { fixture.model.stopBackgroundUsageRefresh(); fixture.clean() }
+        try fixture.writeActiveCredential()
+        await fixture.model.startBackgroundUsageRefresh()
+        await fixture.model.waitForWeeklyUsageRefresh()
+        try await waitForCondition { await clock.pendingDurations == [.seconds(300)] }
+        let settingsURL = fixture.root.appendingPathComponent("store/settings.json")
+        try FileManager.default.createDirectory(at: settingsURL, withIntermediateDirectories: false)
+        do {
+            try await fixture.model.setQuotaRefreshIntervalMinutes(0)
+            Issue.record("An unwritable settings destination must reject the change.")
+        } catch {}
+        #expect(fixture.model.settings.quotaRefreshIntervalMinutes == 5)
+        #expect(await clock.pendingDurations == [.seconds(300)])
+        #expect(await clock.fireNext())
+        try await waitForCondition { fixture.model.usageRefreshRevision == 2 }
+        #expect(await fixture.client.usageReads == 2)
+    }
+
+    @Test(arguments: [-1, 1441])
+    func invalidIntervalCannotChangeTheControllerOrSavedPreferences(minutes: Int) async throws {
+        let clock = ManualUsageClock()
+        let fixture = try ControllerFixture(usageRefreshSleep: { try await clock.sleep(for: $0) })
+        defer { fixture.model.stopBackgroundUsageRefresh(); fixture.clean() }
+        await fixture.model.startBackgroundUsageRefresh()
+        await fixture.model.waitForWeeklyUsageRefresh()
+        try await fixture.model.setQuotaRefreshIntervalMinutes(15)
+        try await waitForCondition { await clock.pendingDurations == [.seconds(900)] }
+        await #expect(throws: QuotaRefreshSettingsError.self) {
+            try await fixture.model.setQuotaRefreshIntervalMinutes(minutes)
+        }
+        #expect(fixture.model.settings.quotaRefreshIntervalMinutes == 15)
+        #expect(try await fixture.store.loadSettings().quotaRefreshIntervalMinutes == 15)
+        #expect(await clock.pendingDurations == [.seconds(900)])
+    }
+
+    @Test func autoResetDeadlineSurvivesDisablingQuotaPolling() async throws {
         let fixture = try ControllerFixture()
         defer { fixture.model.stopBackgroundUsageRefresh(); fixture.clean() }
         try fixture.writeActiveCredential()
@@ -168,6 +293,8 @@ struct AccountControllerTests {
         #expect(!FileManager.default.fileExists(atPath: fixture.store.resetExpiryLogURL.path))
         await fixture.model.setAutoResetEnabled(true)
         await fixture.model.waitForWeeklyUsageRefresh()
+        try await fixture.model.setQuotaRefreshIntervalMinutes(0)
+        #expect(fixture.model.settings.quotaRefreshIntervalMinutes == 0)
         #expect(try await fixture.store.loadSettings().autoResetEnabled)
         try await Task.sleep(for: .seconds(3))
         await fixture.model.waitForWeeklyUsageRefresh()
@@ -291,14 +418,15 @@ private struct ControllerFixture {
     let store: AccountStore
     let client: FixtureClient
     let model: AccountController
-    init() throws {
+    init(usageRefreshSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("switcher-core-test-\(UUID())")
         active = root.appendingPathComponent("active")
         try FileManager.default.createDirectory(at: active, withIntermediateDirectories: true)
         store = AccountStore(baseURL: root.appendingPathComponent("store"), activeHomeURL: active)
         client = FixtureClient()
         model = AccountController(store: store, codex: client,
-            switchService: SwitchService(desktop: FixtureDesktop(), store: store, codex: client))
+            switchService: SwitchService(desktop: FixtureDesktop(), store: store, codex: client),
+            usageRefreshSleep: usageRefreshSleep)
     }
     func writeActiveCredential() throws {
         let claims = Data(#"{"email":"demo@example.test"}"#.utf8).base64EncodedString()
@@ -313,6 +441,11 @@ private struct ControllerFixture {
 
 private actor FixtureClient: AccountClient {
     private(set) var identityReads = 0
+    private(set) var usageReads = 0
+    private(set) var maximumConcurrentUsageReads = 0
+    private var concurrentUsageReads = 0
+    private var isHoldingUsage = false
+    private var usageWaiters: [CheckedContinuation<Void, Never>] = []
     private var usageFails = false
     private var resetExpiry: Date?
     private var consumedHomes: Set<URL> = []
@@ -330,12 +463,27 @@ private actor FixtureClient: AccountClient {
         return .reset
     }
     func failUsage() { usageFails = true }
+    func holdUsageReads() { isHoldingUsage = true }
+    func releaseUsageReads() {
+        isHoldingUsage = false
+        let waiters = usageWaiters
+        usageWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
     func setResetExpiry(_ date: Date) { resetExpiry = date }
     func readIdentity(profileHome: URL) async throws -> AccountIdentity {
         identityReads += 1
         return AccountIdentity(accountID: "demo-account", email: "demo@example.test")
     }
     func readWeeklyUsage(profileHome: URL) async throws -> WeeklyUsage {
+        usageReads += 1
+        concurrentUsageReads += 1
+        maximumConcurrentUsageReads = max(maximumConcurrentUsageReads, concurrentUsageReads)
+        defer { concurrentUsageReads -= 1 }
+        if isHoldingUsage {
+            await withCheckedContinuation { usageWaiters.append($0) }
+        }
+        try Task.checkCancellation()
         if usageFails { throw CodexClientError.connectionClosed }
         let resetConsumed = consumedHomes.contains(profileHome)
         return WeeklyUsage(
@@ -349,6 +497,47 @@ private actor FixtureClient: AccountClient {
     func login(profileHome: URL) async throws -> AccountIdentity {
         throw CodexClientError.loginFailed("Fixture login is disabled.")
     }
+}
+
+private actor ManualUsageClock {
+    private var waiters: [UUID: (Duration, CheckedContinuation<Void, any Error>)] = [:]
+    private(set) var scheduledCount = 0
+    var pendingDurations: [Duration] { waiters.values.map { $0.0 } }
+
+    func sleep(for duration: Duration) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                else {
+                    scheduledCount += 1
+                    waiters[id] = (duration, continuation)
+                }
+            }
+        } onCancel: {
+            Task { await self.cancel(id) }
+        }
+    }
+
+    func fireNext() -> Bool {
+        guard let id = waiters.keys.first, let entry = waiters.removeValue(forKey: id) else { return false }
+        entry.1.resume()
+        return true
+    }
+
+    private func cancel(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.1.resume(throwing: CancellationError())
+    }
+}
+
+@MainActor
+private func waitForCondition(_ condition: @MainActor () async -> Bool) async throws {
+    for _ in 0..<300 {
+        if await condition() { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw CodexClientError.loginFailed("Timed out waiting for the synthetic quota-refresh fixture.")
 }
 
 private struct FixtureDesktop: DesktopControlling {

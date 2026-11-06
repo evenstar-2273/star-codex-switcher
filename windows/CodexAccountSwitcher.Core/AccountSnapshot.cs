@@ -12,9 +12,10 @@ public sealed record AccountRow(Profile Profile, string Initials, Usage? Usage, 
     string UsageStatus = "loaded", SubscriptionSnapshot? Subscription = null, string? PlanType = null,
     string SubscriptionStatus = "unverified", string? SubscriptionError = null);
 public sealed record Preferences(string Language = "system", bool ShowsMenuBarPercentage = true, bool ShowsFiveHourUsage = false,
-    string StatusBarUsageWindow = "fiveHour", bool AutoResetEnabled = false);
+    string StatusBarUsageWindow = "fiveHour", bool AutoResetEnabled = false, int QuotaRefreshIntervalMinutes = 5);
 public sealed record AccountSnapshot(AccountRow[] Accounts, Guid? ActiveAccountID, Preferences Settings,
-    bool IsMutating, bool IsAddingAccount, bool ActiveIdentityConfirmed, string? Error, Dictionary<string, string> Strings)
+    bool IsMutating, bool IsAddingAccount, bool ActiveIdentityConfirmed, string? Error, Dictionary<string, string> Strings,
+    long UsageRefreshRevision = 0)
 {
     public static AccountSnapshot Empty { get; } = new([], null, new(), false, false, true, null, []);
     public string Text(string key) => Strings.GetValueOrDefault(key, key);

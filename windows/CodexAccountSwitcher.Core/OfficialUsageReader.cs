@@ -26,17 +26,34 @@ public static class WindowsHttp
 public sealed class OfficialUsageReader : IDisposable
 {
     private readonly HttpClient http;
-    public OfficialUsageReader(HttpMessageHandler? handler = null) => http = new HttpClient(handler ?? WindowsHttp.Handler()) { Timeout = TimeSpan.FromSeconds(20), MaxResponseContentBufferSize = 1024 * 1024 };
+    private readonly Uri? proxyEndpoint;
+    public OfficialUsageReader(HttpMessageHandler? handler = null, Uri? proxyEndpoint = null)
+    {
+        var transport = handler ?? WindowsHttp.Handler();
+        this.proxyEndpoint = proxyEndpoint ?? (transport is HttpClientHandler { UseProxy: true, Proxy: WebProxy proxy } ? proxy.Address : null);
+        http = new HttpClient(transport) { Timeout = TimeSpan.FromSeconds(20), MaxResponseContentBufferSize = 1024 * 1024 };
+    }
     public async Task<Usage> ReadAsync(LoginCredential credential, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, "https://chatgpt.com/backend-api/wham/usage");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential.AccessToken);
         request.Headers.Add("ChatGPT-Account-Id", credential.AccountID);
         request.Headers.Accept.ParseAdd("application/json");
-        using var response = await http.SendAsync(request, ct);
-        if (response.StatusCode == HttpStatusCode.Unauthorized) throw new IOException("登录凭据失效（401），请重新授权或导入有效凭据。");
-        if (!response.IsSuccessStatusCode) throw new IOException($"读取额度失败（HTTP {(int)response.StatusCode}），请检查网络或稍后重试。");
-        return Parse(await response.Content.ReadAsStringAsync(ct), DateTimeOffset.UtcNow);
+        try {
+            using var response = await http.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode) throw QuotaReadException.FromStatus(response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            try { return Parse(body, DateTimeOffset.UtcNow); }
+            catch (JsonException) { throw new QuotaReadException(QuotaReadException.InvalidResponse); }
+            catch (IOException) { throw new QuotaReadException(QuotaReadException.MissingWindow); }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentOutOfRangeException or FormatException or OverflowException) {
+                throw new QuotaReadException(QuotaReadException.InvalidResponse);
+            }
+        } catch (OperationCanceledException) when (!ct.IsCancellationRequested) {
+            throw new QuotaReadException(proxyEndpoint != null ? QuotaReadException.ProxyTimeout : QuotaReadException.Timeout);
+        } catch (HttpRequestException error) {
+            throw QuotaReadException.FromTransport(error, proxyEndpoint);
+        }
     }
     public static Usage Parse(string json, DateTimeOffset now)
     {

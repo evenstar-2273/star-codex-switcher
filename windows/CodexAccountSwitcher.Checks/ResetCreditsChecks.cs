@@ -186,9 +186,10 @@ internal static class ResetCreditsChecks
         await using (var client = stale.Client((_, _) => ++reads == 1 ? delayed.Task : Task.FromResult(stale.Usage(100)))) {
             await client.InitializeAsync(); await Until(() => reads == 1);
             await client.CommandAsync("resetQuota", stale.Id);
-            delayed.SetResult(stale.Usage(4)); await Until(() => stale.Credits.Reads >= 2);
-            await Task.Delay(30);
-            Require(client.State.Accounts[0].Usage?.RemainingPercent == 100 && client.State.Accounts[0].Usage?.ResetCreditsRemaining == 2, "An older in-flight direct request cannot overwrite reset results.");
+            Require(stale.Credits.Consumes == 0 && client.State.IsMutating, "An in-flight scheduled read holds the account operation gate and cannot race a reset.");
+            delayed.SetResult(stale.Usage(4)); await Until(() => !client.State.IsMutating);
+            await client.CommandAsync("resetQuota", stale.Id);
+            Require(client.State.Accounts[0].Usage?.RemainingPercent == 100 && client.State.Accounts[0].Usage?.ResetCreditsRemaining == 2, "Reset after the earlier read completes publishes fresh quota and the consumed credit balance.");
         }
         using var failedRestart = new ClientFixture { FailSecondStart = true };
         await using (var client = failedRestart.Client()) {

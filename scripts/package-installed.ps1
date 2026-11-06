@@ -35,7 +35,7 @@ $setup=Join-Path $OutputDirectory ("Star-Codex-Switcher-$releaseVersion-Setup-x6
 if($LASTEXITCODE -ne 0){throw 'NSIS build failed'}
 $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($setup+'.sha256',"$hash  $([IO.Path]::GetFileName($setup))`n",[Text.UTF8Encoding]::new($false))
-$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：重置机会最早到期按绿、橙、红三级提醒，3天内加粗，时间与图标同步着色，卡片和确认窗一致；手动全量刷新旋转全部刷新图标，单卡刷新只旋转对应图标，任务完成或失败后停止，防止重复请求并保持滚动位置；设置中标明启动及每 60 分钟的更新检查周期，升级保留账号和设置。"}
+$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：当前使用账号自动置顶，其余账号保持原顺序。新增额度自动刷新设置，默认5分钟，可选禁用、2/5/10/15分钟或自定义1–1440分钟；自定义整数按回车或失焦保存，非法输入不保存。设置即时生效、重启保留，托盘驻留时继续执行；禁用只停止定时刷新，首次加载、手动刷新和自动重置仍保留。刷新失败保留上次额度，卡片直接区分网络或代理故障、超时、登录失效和限流。"}
 [IO.File]::WriteAllText((Join-Path $OutputDirectory 'update-installed.json'),($feed|ConvertTo-Json)+"`n",[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $projectRoot 'windows\artifacts\latest-installed-build.txt'),$publish)
 Write-Output $setup

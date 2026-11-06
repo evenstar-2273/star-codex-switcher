@@ -56,6 +56,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var showsFiveHourUsage: Bool
     public var statusBarUsageWindow: StatusBarUsageWindow
     public var autoResetEnabled: Bool
+    public var quotaRefreshIntervalMinutes: Int
 
     public static let `default` = AppSettings(
         language: .system,
@@ -69,13 +70,15 @@ public struct AppSettings: Codable, Equatable, Sendable {
         showsMenuBarPercentage: Bool = true,
         showsFiveHourUsage: Bool = false,
         statusBarUsageWindow: StatusBarUsageWindow = .fiveHour,
-        autoResetEnabled: Bool = false
+        autoResetEnabled: Bool = false,
+        quotaRefreshIntervalMinutes: Int = 5
     ) {
         self.language = language
         self.showsMenuBarPercentage = showsMenuBarPercentage
         self.showsFiveHourUsage = showsFiveHourUsage
         self.statusBarUsageWindow = statusBarUsageWindow
         self.autoResetEnabled = autoResetEnabled
+        self.quotaRefreshIntervalMinutes = quotaRefreshIntervalMinutes
     }
 
     public init(from decoder: any Decoder) throws {
@@ -96,7 +99,18 @@ public struct AppSettings: Codable, Equatable, Sendable {
         autoResetEnabled = try container.decodeIfPresent(
             Bool.self, forKey: .autoResetEnabled
         ) ?? false
+        quotaRefreshIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .quotaRefreshIntervalMinutes) ?? 5
+        try Self.validateQuotaRefreshInterval(quotaRefreshIntervalMinutes)
     }
+
+    public static func validateQuotaRefreshInterval(_ minutes: Int) throws {
+        guard (0...1440).contains(minutes) else { throw QuotaRefreshSettingsError.invalidInterval }
+    }
+}
+
+public enum QuotaRefreshSettingsError: LocalizedError {
+    case invalidInterval
+    public var errorDescription: String? { "额度刷新间隔必须是 1–1440 的整数分钟，或使用 0 禁用。 / Invalid quota refresh interval." }
 }
 
 public struct WeeklyUsage: Codable, Equatable, Sendable {
