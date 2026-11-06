@@ -161,18 +161,18 @@ internal static class Program
             Assert(All<TextBlock>(window).Any(t => t.Text == "托盘显示额度") && !All<TextBlock>(window).Any(t => t.Text == "status_bar_usage_window"), "The tray quota label must have a Chinese fallback when the host omits its translation.");
             Assert(!All<CheckBox>(window).Any(toggle => System.Windows.Automation.AutomationProperties.GetName(toggle) == "显示 5 小时用量"),
                 "Five-hour visibility is inferred from account data, without a settings toggle.");
-            var experiment = All<CheckBox>(window).Single(toggle => System.Windows.Automation.AutomationProperties.GetName(toggle) == "到期前自动使用重置机会");
+            var experiment = All<CheckBox>(window).Single(toggle => System.Windows.Automation.AutomationProperties.GetName(toggle) == "到期前自动使用重置卡");
             Assert(experiment.IsChecked == false, "Auto-reset must default to off.");
             experiment.IsChecked = true; experiment.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
             Assert(client.Commands.SequenceEqual(new[] { "autoReset:True" }),
                 "The auto-reset toggle must send the setting to the shared host.");
-            Assert(All<TextBlock>(window).Any(text => text.Text == "重置机会到期前 10 分钟，自动使用所有已保存账号的可用重置次数；应用须运行且电脑保持唤醒。"),
+            Assert(All<TextBlock>(window).Any(text => text.Text == "重置卡到期前 10 分钟，自动使用所有已保存账号的可用重置卡；应用须运行且电脑保持唤醒。"),
                 "Settings must disclose real reset consumption and runtime requirements.");
             Assert(!All<TextBlock>(window).Any(text => text.Text.Contains("reset", StringComparison.OrdinalIgnoreCase)), "Chinese settings replace legacy host reset wording with complete Chinese labels.");
             Assert(!All<TextBlock>(window).Any(text => text.Text is "保存" or "Save"), "Settings must not have a Save flow.");
             client.State = client.State with { Settings = client.State.Settings with { ShowsFiveHourUsage = true, AutoResetEnabled = true } };
             window.Navigate("settings"); Render(window, Path.Combine(output, "settings-auto-reset-enabled-zh.png"));
-            Assert(All<CheckBox>(window).Single(toggle => System.Windows.Automation.AutomationProperties.GetName(toggle) == "到期前自动使用重置机会").IsChecked == true,
+            Assert(All<CheckBox>(window).Single(toggle => System.Windows.Automation.AutomationProperties.GetName(toggle) == "到期前自动使用重置卡").IsChecked == true,
                 "The auto-reset toggle must reflect the persisted setting.");
             window.Navigate("accounts"); Render(window, Path.Combine(output, "accounts-five-hour-zh.png"));
             Assert(All<TextBlock>(window).Count(text => text.Text == "5 小时剩余") == 2, "Five-hour view must be per account.");
@@ -407,13 +407,13 @@ internal static class Program
         All<Button>(window).First(button => Name(button) == "重置额度" && button.IsEnabled).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Render(window, Path.Combine(output, "reset-confirm.png"));
         Assert(window.CurrentPage == "resetQuota" && client.Commands.Count == before, "Opening reset does not consume a credit.");
-        Assert(All<TextBlock>(window).Any(text => text.Text.Contains("重置机会最早到期")), "Confirmation distinguishes reset credit expiry from quota recovery.");
+        Assert(All<TextBlock>(window).Any(text => text.Text.Contains("重置卡最早到期")), "Confirmation distinguishes reset credit expiry from quota recovery.");
         All<Button>(window).Single(button => Name(button) == "取消").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Render(window, Path.Combine(output, "reset-cancelled.png"));
         Assert(client.Commands.Count == before, "Cancelling reset is read-only.");
         All<Button>(window).First(button => Name(button) == "重置额度" && button.IsEnabled).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Render(window, Path.Combine(output, "reset-confirm.png"));
-        var confirm = All<Button>(window).Single(button => Name(button) == "确认重置 · 消耗 1 次");
+        var confirm = All<Button>(window).Single(button => Name(button) == "确认重置 · 消耗 1 张");
         Assert(!confirm.IsDefault, "Enter cannot consume a reset credit by default.");
         confirm.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Assert(client.Commands.Count == before + 1 && client.Commands.Last() == "resetQuota:" && client.LastAccountId == rows[1].Profile.Id,

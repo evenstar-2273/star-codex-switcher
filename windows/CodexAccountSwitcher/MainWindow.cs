@@ -35,9 +35,10 @@ public sealed class MainWindow : Window
     private int renderedLayout;
     private AdaptiveCardGrid? accountGrid;
     private RefreshRotation? refreshRotation;
+    private RefreshRotation? resetRotation;
     private QuotaRefreshSelector? quotaRefreshSelector;
     private bool layoutPending, closingForExit;
-    public bool IsBusy => refreshRotation != null || client.State.IsMutating || native.IsInstalling;
+    public bool IsBusy => refreshRotation != null || resetRotation != null || client.State.IsMutating || native.IsInstalling;
     public string CurrentPage => page;
     public ScrollViewer PageScrollViewer => scroll;
     private double LayoutWidth => ActualWidth > 0 ? ActualWidth : Width;
@@ -47,8 +48,8 @@ public sealed class MainWindow : Window
     private bool Chinese => WindowsLocalization.IsChinese(State.Settings.Language);
     private string L(string chinese, string english) => Chinese ? chinese : english;
     private string T(string key) {
-        if (Chinese && key == "auto_reset") return "到期前自动使用重置机会";
-        if (Chinese && key == "auto_reset_hint") return "重置机会到期前 10 分钟，自动使用所有已保存账号的可用重置次数；应用须运行且电脑保持唤醒。";
+        if (Chinese && key == "auto_reset") return "到期前自动使用重置卡";
+        if (Chinese && key == "auto_reset_hint") return "重置卡到期前 10 分钟，自动使用所有已保存账号的可用重置卡；应用须运行且电脑保持唤醒。";
         return key switch {
             "accounts" => L("账号", "Accounts"), "settings" => L("设置", "Settings"), "back" => L("返回", "Back"),
             "cancel" => L("取消", "Cancel"), "remove" => L("删除", "Delete"), "switch" => L("切换账号", "Switch account"),
@@ -63,7 +64,7 @@ public sealed class MainWindow : Window
             "launch_at_login" => L("开机启动", "Launch at login"), "language" => L("语言", "Language"),
             "system_default" => L("跟随系统", "System"), "english" => "English", "simplified_chinese" => "简体中文",
             "auto_reset" => L("自动重置额度", "Automatically reset quota"),
-            "auto_reset_hint" => L("启用后由账号核心在满足条件时使用重置机会。", "The account core uses reset credits when its automatic reset conditions are met."),
+            "auto_reset_hint" => L("启用后由账号核心在满足条件时使用重置卡。", "The account core uses reset credits when its automatic reset conditions are met."),
             "open_reset_log" => L("打开重置日志目录", "Open reset log folder"),
             "automatically_check_updates" => L("自动检查更新", "Automatically check for updates"),
             "check_for_updates" => L("检查更新", "Check for updates"),
@@ -91,7 +92,7 @@ public sealed class MainWindow : Window
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => { layoutPending = false; if (LayoutKey != renderedLayout) Render(); }));
         };
         presentationTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
-        presentationTimer.Tick += (_, _) => { if (IsVisible && page == "accounts" && !IsBusy) Render(); }; presentationTimer.Start();
+        presentationTimer.Tick += (_, _) => { if (IsVisible && (page is "accounts" or "resetQuota") && !IsBusy) Render(); }; presentationTimer.Start();
         client.Changed += OnClientChanged; this.native.Changed += Render;
         Activated += (_, _) => EvaluateUpdatePrompt();
         IsVisibleChanged += (_, _) => EvaluateUpdatePrompt();
@@ -101,6 +102,7 @@ public sealed class MainWindow : Window
         Closed += (_, _) => {
             presentationTimer.Stop(); client.Changed -= OnClientChanged; this.native.Changed -= Render;
             refreshRotation?.Dispose();
+            resetRotation?.Dispose();
         };
         Render();
     }
@@ -112,6 +114,27 @@ public sealed class MainWindow : Window
     }
     public void Navigate(string destination) { page = destination == "manage" ? "accounts" : destination; target = null; localError = null; Render(); }
     private async Task Run(string command, Guid? id = null, bool? value = null, string? language = null) {
+        if (command == "resetQuota") {
+            if (IsBusy || State.IsAddingAccount || closingForExit || id == null ||
+                State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage?.ResetCreditsRemaining is not > 0) return;
+            // The request includes the quota/credit readback. Keep the confirmation
+            // busy until all of it completes, including before the host acknowledges it.
+            var rotation = new RefreshRotation(id);
+            resetRotation = rotation; localError = null;
+            Render();
+            try { await client.CommandAsync(command, id, value, language); }
+            catch (Exception ex) { localError = ex.Message; }
+            finally {
+                rotation.Dispose();
+                if (ReferenceEquals(resetRotation, rotation)) resetRotation = null;
+                // Some backend failures are reported in State.Error without throwing.
+                // Leave their exact outcome visible; never automatically retry a reset.
+                if (localError == null && State.Error == null && page == "resetQuota" && target?.Profile.Id == id)
+                    Navigate(confirmationReturnPage);
+                else Render();
+            }
+            return;
+        }
         if (command == "refresh") {
             if (IsBusy || State.IsAddingAccount || closingForExit) return;
             // Keep one animation clock for the entire awaited request. Re-rendered icons
@@ -388,9 +411,11 @@ public sealed class MainWindow : Window
         AutomationProperties.SetName(change, row.Profile.Email ?? row.Profile.DisplayName);
         change.ToolTip = active ? L("当前使用的账号", "Current account") : L("确认后切换此账号", "Confirm before switching to this account"); accountActions.Children.Add(change);
         var count = row.Usage?.ResetCreditsRemaining?.ToString(CultureInfo.CurrentCulture) ?? T("unknown");
-        var reset = Button(L("重置 " + count + " 次", "Reset " + count), () => { if (row.Usage?.ResetCreditsRemaining > 0) StartConfirmation(row, "resetQuota"); }, "\uE777");
+        var resetting = resetRotation?.Includes(row.Profile.Id) == true;
+        var reset = Button(resetting ? L("重置中…", "Resetting…") : L("重置 " + count + " 次", "Reset " + count), () => { if (row.Usage?.ResetCreditsRemaining > 0) StartConfirmation(row, "resetQuota"); }, "\uE777");
+        if (resetting) AttachResetRotation(reset);
         reset.IsEnabled &= !State.IsAddingAccount && row.Usage?.ResetCreditsRemaining > 0; reset.Margin = new Thickness(10, 0, 0, 0);
-        reset.ToolTip = row.Usage?.ResetCreditsRemaining switch { null => L("可用重置次数未知，请先刷新。", "Reset credits are unknown; refresh first."), <= 0 => L("没有可用重置次数。", "No reset credits available."), _ => L("确认后消耗 1 次重置机会。", "Confirm to use one reset credit.") };
+        reset.ToolTip = row.Usage?.ResetCreditsRemaining switch { null => L("可用重置次数未知，请先刷新。", "Reset credits are unknown; refresh first."), <= 0 => L("没有可用重置次数。", "No reset credits available."), _ => L("确认后消耗 1 张重置卡。", "Confirm to use one reset credit.") };
         AutomationProperties.SetName(reset, L("重置额度", "Reset quota")); accountActions.Children.Add(reset);
         var refresh = RefreshButton("", row.Profile.Id);
         refresh.ToolTip = L("刷新此账号", "Refresh this account"); AutomationProperties.SetName(refresh, L("刷新此账号", "Refresh this account")); utilityActions.Children.Add(refresh);
@@ -436,7 +461,7 @@ public sealed class MainWindow : Window
         var tone = AccountVisuals.ResetExpiryTone(expiry, currentTime);
         var line = new Grid();
         line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(26) }); line.ColumnDefinitions.Add(new ColumnDefinition());
-        AutomationProperties.SetName(line, L("重置机会到期", "Reset credit expiry"));
+        AutomationProperties.SetName(line, L("重置卡到期", "Reset credit expiry"));
         var icon = IconText("\uE777", 16); icon.SetResourceReference(TextBlock.ForegroundProperty, tone); line.Children.Add(icon);
         var label = Text(AccountVisuals.ResetExpiryLabel(expiry, currentTime, Chinese, compact), 14, bold: tone is "Warning" or "Danger");
         label.SetResourceReference(TextBlock.ForegroundProperty, tone);
@@ -466,7 +491,7 @@ public sealed class MainWindow : Window
         }
         var copy = page switch {
             "switch" => L("先联网验证目标账号；凭据失效或网络异常时保留当前登录。验证通过后，将强制结束并重新打开 Codex。未保存的状态可能丢失，请先完成当前任务。", "The target login is checked before Codex closes. Invalid credentials or network errors preserve the current login. Codex then closes forcibly and restarts. Finish active tasks first; unsaved work may be lost."),
-            "resetQuota" => L("本次操作将消耗 1 次重置机会。", "This uses one reset credit."),
+            "resetQuota" => L("本次操作将消耗 1 张重置卡。", "This uses one reset credit."),
             _ => L("仅从此工具删除保存的账号，不会删除 ChatGPT 账号。此操作无法撤销。", "Remove the saved login from this tool. This does not delete the ChatGPT account. This cannot be undone.")
         };
         var text = Text(copy, 15, bold: page == "resetQuota"); text.TextWrapping = TextWrapping.Wrap;
@@ -479,14 +504,22 @@ public sealed class MainWindow : Window
         var notice = Box(note, page == "resetQuota" ? "WarningSurface" : "InputSurface", 9); notice.Margin = new Thickness(0, 22, 0, 22); content.Children.Add(notice);
         var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right }; buttons.Children.Add(Button(T("cancel"), () => Navigate(confirmationReturnPage)));
         var command = page; var id = target.Profile.Id;
-        var confirm = Button(page == "resetQuota" ? L("确认重置", "Confirm reset") : T(command), () => {
+        var resetting = page == "resetQuota" && resetRotation?.Includes(id) == true;
+        var confirm = Button(page == "resetQuota" ? resetting ? L("重置中…", "Resetting…") : L("确认重置", "Confirm reset") : T(command), () => {
             if (IsBusy || State.IsAddingAccount || command == "resetQuota" && State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage?.ResetCreditsRemaining is not > 0) return;
-            Navigate(confirmationReturnPage); _ = Run(command, id);
-        });
+            if (command == "resetQuota") _ = Run(command, id);
+            else { Navigate(confirmationReturnPage); _ = Run(command, id); }
+        }, resetting ? "\uE777" : null);
+        if (resetting) AttachResetRotation(confirm);
         confirm.IsEnabled &= !State.IsAddingAccount && (page != "resetQuota" || target.Usage?.ResetCreditsRemaining > 0);
-        if (page == "resetQuota") AutomationProperties.SetName(confirm, L("确认重置 · 消耗 1 次", "Confirm reset · use one credit"));
+        if (page == "resetQuota") AutomationProperties.SetName(confirm, resetting ? L("重置中…", "Resetting…") : L("确认重置 · 消耗 1 张", "Confirm reset · use one credit"));
         confirm.Margin = new Thickness(10, 0, 0, 0); Primary(confirm); buttons.Children.Add(confirm); content.Children.Add(buttons);
         var box = Box(content); box.MaxWidth = 720; box.HorizontalAlignment = HorizontalAlignment.Stretch; body.Children.Add(box);
+    }
+    private void AttachResetRotation(Button button) {
+        var icon = ((StackPanel)button.Content).Children.OfType<TextBlock>().First();
+        icon.RenderTransformOrigin = new Point(.5, .5);
+        icon.RenderTransform = resetRotation!.Transform;
     }
 
     private void Settings(StackPanel body)
@@ -498,8 +531,9 @@ public sealed class MainWindow : Window
             inner.Children.Add(head); var rows = new StackPanel { Margin = new Thickness(18, 2, 18, 10) }; inner.Children.Add(rows);
             var section = Box(inner); section.Margin = new Thickness(0, 0, 0, 18); settings.Children.Add(section); return rows;
         }
-        void Row(StackPanel section, string title, string glyph, UIElement control, string? hint = null) {
+        void Row(StackPanel section, string title, string glyph, UIElement control, string? hint = null, bool alignTop = false) {
             var label = new Grid(); label.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) }); label.ColumnDefinitions.Add(new ColumnDefinition());
+            if (alignTop) { label.VerticalAlignment = VerticalAlignment.Top; label.Margin = new Thickness(0, 9, 0, 0); }
             label.Children.Add(IconText(glyph, 18)); var text = Text(title, 16); text.TextWrapping = TextWrapping.Wrap; text.Margin = new Thickness(0, 0, 12, 0);
             Grid.SetColumn(text, 1); label.Children.Add(text); var row = Pair(label, control); row.MinHeight = 52; section.Children.Add(row);
             if (hint != null) { var description = Text(hint, 13, muted: true); description.TextWrapping = TextWrapping.Wrap; description.Margin = new Thickness(34, 0, 0, 10); section.Children.Add(description); }
@@ -550,12 +584,14 @@ public sealed class MainWindow : Window
         var trayHint = Text(L("关闭窗口后保留在托盘。账号支持 5 小时额度时会自动显示。", "Closing the window keeps the app in the tray. Five-hour quota appears when supported."), 13, muted: true);
         trayHint.TextWrapping = TextWrapping.Wrap; trayHint.Margin = new Thickness(0, 8, 0, 4); general.Children.Add(trayHint);
         var quotaRefresh = Section(L("额度刷新", "Quota refresh"));
-        quotaRefreshSelector ??= new QuotaRefreshSelector(State.Settings.QuotaRefreshIntervalMinutes, Chinese,
-            minutes => client.CommandAsync("quotaRefreshInterval", language: minutes.ToString(CultureInfo.InvariantCulture)));
+        quotaRefreshSelector ??= new QuotaRefreshSelector(State.Settings.QuotaRefreshIntervalMinutes, Chinese, async minutes => {
+            await client.CommandAsync("quotaRefreshInterval", language: minutes.ToString(CultureInfo.InvariantCulture));
+            if (State.Settings.QuotaRefreshIntervalMinutes != minutes) throw new InvalidOperationException("The refresh interval was not confirmed by the account service.");
+        });
         quotaRefreshSelector.UpdateState(State.Settings.QuotaRefreshIntervalMinutes, Chinese, !IsBusy && !State.IsAddingAccount);
         Row(quotaRefresh, L("刷新间隔", "Refresh interval"), "\uE72C", quotaRefreshSelector,
-            L("禁用仅停止定时刷新，不影响手动刷新。应用驻留托盘时仍会定时刷新，电脑需保持唤醒。自定义范围为 1–1440 分钟，按 Enter 或移开焦点保存。",
-                "Disabling stops scheduled refreshes only; manual refresh remains available. Scheduled refreshes continue in the tray while the computer is awake. Custom: 1–1440 minutes; press Enter or move focus to save."));
+            L("禁用仅停止定时刷新，不影响手动刷新。应用驻留托盘时仍会定时刷新，电脑需保持唤醒。自定义范围为 1–1440 分钟，点击保存，也可按 Enter 或移开焦点保存。",
+                "Disabling stops scheduled refreshes only; manual refresh remains available. Scheduled refreshes continue in the tray while the computer is awake. Custom: 1–1440 minutes; click Save, press Enter or move focus to save."), alignTop: true);
         var automation = Section(L("自动重置", "Automatic reset"));
         Row(automation, T("auto_reset"), "\uE777", Toggle(T("auto_reset"), State.Settings.AutoResetEnabled, value => _ = Run("autoReset", value: value)), T("auto_reset_hint"));
         var log = Button(T("open_reset_log"), () => {

@@ -42,25 +42,31 @@ $nsisPath = (Get-Command makensis).Source
 ./scripts/package-installed.ps1 -SwiftRuntimeDirectory ./windows/artifacts/installer-runtime -Dotnet $dotnetPath -Makensis $nsisPath -OutputDirectory ./windows/artifacts/release
 ```
 
-当前版本为 `1.0.5`，后续从 `1.0.6` 递增。内部 `FileVersion` 使用四段形式（如 `1.0.5.0`），文件名和 Release tag 使用三段形式（如 `v1.0.5`）。可以通过 `-ReleaseTag` 显式指定；必须与实际 GitHub Release tag 完全一致。
+当前版本为 `1.0.6`，后续从 `1.0.7` 递增。内部 `FileVersion` 使用四段形式（如 `1.0.6.0`），文件名和 Release tag 使用三段形式（如 `v1.0.6`）。可以通过 `-ReleaseTag` 显式指定；必须与实际 GitHub Release tag 完全一致。
 
-1.0.5 的交付名称如下；仓库地址中的 `star-codex-switcher` 保持不变：
+1.0.6 的交付名称如下；仓库地址中的 `star-codex-switcher` 保持不变：
 
 | 用途 | 名称 |
 | --- | --- |
 | 显示标题、快捷方式、安装显示名 | `Star Codex Switcher` |
-| 安装包 | `Star-Codex-Switcher-1.0.5-Setup-x64.exe` |
+| 安装包 | `Star-Codex-Switcher-1.0.6-Setup-x64.exe` |
 | 安装后的主程序 | `StarCodexSwitcher.exe` |
 | 开发/打包中间应用 | `Star-Codex-Switcher-windows-x64.exe` |
 | 源码下载 | GitHub 自动提供的 `Source code (zip)` / `Source code (tar.gz)` |
-| 安装包校验文件 | `Star-Codex-Switcher-1.0.5-Setup-x64.exe.sha256` |
+| 安装包校验文件 | `Star-Codex-Switcher-1.0.6-Setup-x64.exe.sha256` |
 | 更新清单 | `update-installed.json` |
 
 安装脚本生成安装包、校验文件与更新清单。从 1.0.4 起只上传这三项 Release 资产，不再单独制作或上传源码包；源码使用 GitHub 根据对应 tag 自动提供的 Source code (zip/tar.gz)。新用户默认安装路径为 `%LOCALAPPDATA%\Programs\Star Codex Switcher`；旧用户升级沿用现有安装位置。更名时保留既有账号数据目录、登录记录和设置存储。
 
 安装包清单含安装包哈希与内置应用哈希；重新构建安装包后必须重新生成清单，不得只更换 EXE。
 
-1.0.5 的更新提示概括额度自动刷新设置：默认 5 分钟，禁用、2、5、10、15 分钟及自定义；自定义整数范围 1–1440 分钟，回车或失焦保存，非法输入不保存。发布前需验证即时生效、重启保留、托盘驻留有效、禁用只停止定时刷新，以及首次加载、手动刷新和自动重置继续可用；还需检查修改间隔不产生重复计时器或重叠请求。以下均为待执行的发布检查，文档更新本身不表示验证通过。
+确认重置按钮还需验证：点击后立即显示旋转加载和“重置中…”；请求及回读完成前保持忙碌，重复点击不产生第二次请求；成功完成或失败均停止动画，失败保留明确提示。此检查使用合成请求，不消耗真实重置卡。
+
+1.0.6 的更新提示说明重置卡到期倒计时，以及自定义额度刷新间隔的保存反馈和下拉样式。账号列表与重置确认页在最早到期时间后显示括号剩余时间，并随时间更新；自定义间隔新增明确的“保存”按钮及未保存、成功、失败反馈，保留回车与失焦保存，并整合圆角输入框、分钟单位、下拉图标和深浅主题菜单。
+
+发布前需验证两个到期入口的文本一致、倒计时持续更新、窄窗口可读，并回归原有三级颜色、未知时间及已到期提示。刷新设置需验证保存按钮、回车和失焦三种入口、失败后重试、非法值不保存、重启后读取已保存值，以及下拉菜单在深浅主题和窄窗口中的显示。以上均为待执行的发布检查，文档更新本身不表示验证通过。
+
+继续回归 1.0.5 引入的额度自动刷新设置：默认 5 分钟，禁用、2、5、10、15 分钟及自定义；自定义整数范围 1–1440 分钟，回车或失焦保存，非法输入不保存。验证即时生效、重启保留、托盘驻留有效、禁用只停止定时刷新，以及首次加载、手动刷新和自动重置继续可用；还需检查修改间隔不产生重复计时器或重叠请求。
 
 继续回归卡片和重置确认的边界：超过 3 天为绿、超过 24 小时且不超过 3 天为橙、24 小时内为红；时间和图标同步着色，3 天内加粗，未知为灰，已到期提示待刷新。手动全量刷新及打开窗口实际发起的全量刷新应使顶部和所有卡片图标旋转；单卡刷新仅影响对应图标。等待实际任务完成或失败后停止，期间阻止重复请求并保持滚动位置。普通后台读取不应被描述为每次都有旋转动效。
 
@@ -78,10 +84,10 @@ $nsisPath = (Get-Command makensis).Source
 
 ## 发布步骤
 
-1. 先在本地完成代码和文档修改，更新版本号、`CHANGELOG.md`、软件内新版本提示与 Release 说明。提交信息说明具体变化及验证结果。
+1. 先在本地完成代码和文档修改，更新版本号、`CHANGELOG.md`、软件内新版本提示与 Release 说明。提交标题和正文统一使用中文，说明具体变化及验证结果。
 2. 在本地编译、打包并运行相应检查；界面变化还需查看实际截图。验证失败先修复，不先提交一个尚未验证的发布版本。
 3. 在隔离 Windows 用户或测试机验证首次安装、旧安装位置升级、账号与设置保留、更新完成后启动、卸载，以及无 SDK 环境运行。使用合成或测试账号，不在发布资产中放入个人账号。
-4. 本地检查通过后正常提交源码并运行 CI，保留 1.0.0 及后续 Git 提交和 tag 历史，不重建分支历史。CI 通过后，创建与已验证构建一致的 tag（本次为 `v1.0.5`）；GitHub 会自动提供该 tag 的 Source code (zip/tar.gz)，无需另外制作源码包。
+4. 本地检查通过后正常提交源码并运行 CI，保留 1.0.0 及后续 Git 提交和 tag 历史，不重建分支历史。CI 通过后，创建与已验证构建一致的 tag（本次为 `v1.0.6`）；GitHub 会自动提供该 tag 的 Source code (zip/tar.gz)，无需另外制作源码包。
 5. 在 [GitHub Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 创建该 tag 的草稿 Release，只上传同一版本的安装包、SHA-256 文件和 `update-installed.json` 三项资产。确认资产齐全、版本和哈希匹配，再准备公开；不要先更新清单，再补尚不可下载的安装包。
 6. 将资产齐全的草稿正式发布为 Latest，保留已有历史版本及其下载资产。
 7. 从公网重新下载新版安装包和清单，核对 `download_url`、版本、包哈希与内置应用哈希；确认软件能检测到新版，提示文案与本次改动一致。该步骤验证公开可下载性，不能用草稿上传成功代替。
@@ -98,7 +104,7 @@ GitHub 保留历史安装包、Release、资产、提交和 tag，Latest 与软�
 
 ## 自有服务器下载镜像
 
-可将同一已验证安装包及其 `.sha256` 同步到 `https://starsmsai.top/codex-switcher/`。例如本次文件名为 `Star-Codex-Switcher-1.0.5-Setup-x64.exe` 及 `Star-Codex-Switcher-1.0.5-Setup-x64.exe.sha256`；先以临时文件上传，再完成改名，随后通过公开 HTTPS 下载核对大小和 SHA-256，确认与 GitHub 交付一致后再提供地址。
+可将同一已验证安装包及其 `.sha256` 同步到 `https://starsmsai.top/codex-switcher/`。例如本次文件名为 `Star-Codex-Switcher-1.0.6-Setup-x64.exe` 及 `Star-Codex-Switcher-1.0.6-Setup-x64.exe.sha256`；先以临时文件上传，再完成改名，随后通过公开 HTTPS 下载核对大小和 SHA-256，确认与 GitHub 交付一致后再提供地址。
 
 该目录仅提供备用下载，软件自动更新仍固定读取 GitHub 的 `update-installed.json`。新版公开包、校验文件、更新清单及镜像验证成功后，镜像目录只保留最新安装包和对应 `.sha256`；旧版本继续从 GitHub 历史 Release 下载。镜像部署不另传源码包，已有源码及源码归档保留，源码下载使用 GitHub 自带的 Source code。
 

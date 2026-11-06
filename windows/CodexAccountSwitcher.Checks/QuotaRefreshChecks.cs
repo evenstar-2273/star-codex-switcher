@@ -12,10 +12,100 @@ internal static class QuotaRefreshChecks
         try {
             await ManagedAsync();
             await InitialResetCycleAsync();
-            if (host != null) await HostAsync(Path.GetFullPath(host));
+            await SettingFailureAsync();
+            if (host != null) {
+                await GuardedHostSettingAsync(Path.GetFullPath(host));
+                await HostAsync(Path.GetFullPath(host));
+            }
             Console.WriteLine($"PASS: {passed} quota refresh assertions; single revision-driven direct batch, configured periodic clock, disabled/manual behavior, persistence and account-operation coordination.");
             return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }
+    }
+    public static async Task<int> RunSettingsAsync(string? host)
+    {
+        try {
+            await SettingFailureAsync();
+            if (host != null) await GuardedHostSettingAsync(Path.GetFullPath(host));
+            Console.WriteLine($"PASS: {passed} quota settings assertions; guarded one-minute save/restart, busy rejection, actual persistence failure and retry.");
+            return 0;
+        } catch (Exception error) { Console.Error.WriteLine(error); return 1; }
+    }
+    private static async Task SettingFailureAsync()
+    {
+        using var fixture = new Fixture();
+        await using var client = fixture.Client;
+        await client.InitializeAsync(); await Idle(client);
+        fixture.Runtime.CommandGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var held = client.CommandAsync("language", language: "english");
+        var before = fixture.Runtime.Calls;
+        try {
+            await Reject(() => client.CommandAsync("quotaRefreshInterval", language: "1"));
+            Check(fixture.Runtime.Calls == before && client.State.Settings.QuotaRefreshIntervalMinutes == 0,
+                "A busy guarded client rejects one-minute save without forwarding or reporting a changed value.");
+        } finally { fixture.Runtime.CommandGate.SetResult(); await held; fixture.Runtime.CommandGate = null; }
+        fixture.Runtime.SettingError = new IOException("Synthetic settings persistence failed.");
+        await Reject(() => client.CommandAsync("quotaRefreshInterval", language: "1"));
+        Check(client.State.Settings.QuotaRefreshIntervalMinutes == 0,
+            "A failed persistence acknowledgement crosses the guarded layer and retains the last effective interval.");
+        fixture.Runtime.SettingError = null;
+        await client.CommandAsync("quotaRefreshInterval", language: "1");
+        Check(client.State.Settings.QuotaRefreshIntervalMinutes == 1,
+            "A successful retry publishes the custom minimum of one minute before returning.");
+        Check(File.ReadAllBytes(fixture.ActiveCredential).SequenceEqual(fixture.OriginalBytes),
+            "Failed and successful settings saves preserve the active authentication bytes.");
+    }
+    private static async Task GuardedHostSettingAsync(string host)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "switcher-quota-setting-host-" + Guid.NewGuid());
+        var previousCli = Environment.GetEnvironmentVariable("CODEX_CLI_PATH");
+        var data = Path.Combine(root, "data"); var active = Path.Combine(root, "active");
+        Directory.CreateDirectory(data); Directory.CreateDirectory(active);
+        var authPath = Path.Combine(active, "auth.json");
+        var credential = GuardedChecks.Credential("quota-setting-host").Bytes;
+        File.WriteAllBytes(authPath, credential);
+        var settingsPath = Path.Combine(data, "settings.json");
+        File.WriteAllText(settingsPath, "{\"language\":\"simplifiedChinese\",\"quotaRefreshIntervalMinutes\":0}");
+        GuardedAccountClient CreateClient() => new(host, data, active, validator: new Validator(), resetCredits: new Credits(),
+            usageReader: (_, _) => Task.FromResult(new Usage(80, DateTimeOffset.UtcNow.AddDays(1), 90, DateTimeOffset.UtcNow.AddHours(2), 2)),
+            subscriptionReader: new NoSubscription());
+        int SavedInterval() {
+            using var saved = JsonDocument.Parse(File.ReadAllBytes(settingsPath));
+            return saved.RootElement.GetProperty("quotaRefreshIntervalMinutes").GetInt32();
+        }
+        try {
+            Environment.SetEnvironmentVariable("CODEX_CLI_PATH", Environment.ProcessPath);
+            await using (var client = CreateClient()) {
+                await client.InitializeAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                await Until(() => client.State.UsageRefreshRevision > 0, 15000); await Idle(client);
+                var observedOne = false;
+                client.Changed += () => { if (client.State.Settings.QuotaRefreshIntervalMinutes == 1) observedOne = true; };
+                await client.CommandAsync("quotaRefreshInterval", language: "1").WaitAsync(TimeSpan.FromSeconds(10));
+                Check(client.State.Settings.QuotaRefreshIntervalMinutes == 1 && observedOne,
+                    "A real host behind GuardedAccountClient publishes the one-minute value and notification before save completes.");
+                Check(SavedInterval() == 1, "The guarded one-minute save writes Swift settings to the isolated disk file.");
+                // Deny delete/replace only on this fixture file, making the real Windows atomic save fail.
+                using (var locked = new FileStream(settingsPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
+                    await Reject(() => client.CommandAsync("quotaRefreshInterval", language: "2").WaitAsync(TimeSpan.FromSeconds(10)));
+                    Check(client.State.Settings.QuotaRefreshIntervalMinutes == 1 && SavedInterval() == 1,
+                        "An actual Swift atomic-write failure throws through CoreClient and Guarded without changing effective or saved settings.");
+                }
+                await client.CommandAsync("quotaRefreshInterval", language: "2").WaitAsync(TimeSpan.FromSeconds(10));
+                Check(client.State.Settings.QuotaRefreshIntervalMinutes == 2 && SavedInterval() == 2,
+                    "Releasing the fixture file lock allows a successful save retry without restarting the client.");
+                await client.CommandAsync("quotaRefreshInterval", language: "1").WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            await using (var restored = CreateClient()) {
+                await restored.InitializeAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                await Idle(restored);
+                Check(restored.State.Settings.QuotaRefreshIntervalMinutes == 1 && SavedInterval() == 1,
+                    "A new guarded client and real host restore the saved custom one-minute value after restart.");
+            }
+            Check(File.ReadAllBytes(authPath).SequenceEqual(credential),
+                "Real guarded save, failed persistence and restart leave the original authentication untouched.");
+        } finally {
+            Environment.SetEnvironmentVariable("CODEX_CLI_PATH", previousCli);
+            SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root);
+        }
     }
     private static async Task InitialResetCycleAsync()
     {
@@ -233,6 +323,7 @@ internal static class QuotaRefreshChecks
         public AccountSnapshot State { get; private set; } = state;
         public event Action? Changed;
         public TaskCompletionSource? CommandGate;
+        public IOException? SettingError;
         public int Calls;
         public Task InitializeAsync() => Task.CompletedTask;
         public void Publish(AccountSnapshot snapshot) { State = snapshot; Changed?.Invoke(); }
@@ -240,7 +331,10 @@ internal static class QuotaRefreshChecks
             Calls++;
             if (CommandGate != null) await CommandGate.Task;
             if (command == "refresh") Publish(State with { UsageRefreshRevision = State.UsageRefreshRevision + 1 });
-            if (command == "quotaRefreshInterval") Publish(State with { Settings = State.Settings with { QuotaRefreshIntervalMinutes = int.Parse(language!, System.Globalization.CultureInfo.InvariantCulture) } });
+            if (command == "quotaRefreshInterval") {
+                if (SettingError != null) throw SettingError;
+                Publish(State with { Settings = State.Settings with { QuotaRefreshIntervalMinutes = int.Parse(language!, System.Globalization.CultureInfo.InvariantCulture) } });
+            }
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
@@ -250,4 +344,8 @@ internal static class QuotaRefreshChecks
         public Task ConsumeAsync(LoginCredential credential, CancellationToken ct) => throw new Exception("Scheduling may not spend a reset credit.");
     }
     private sealed class Validator : ILoginValidator { public Task ValidateAsync(LoginCredential credential, CancellationToken ct) => Task.CompletedTask; }
+    private sealed class NoSubscription : ISubscriptionReader {
+        public Task<SubscriptionLookup> ReadAsync(LoginCredential credential, CancellationToken ct) =>
+            Task.FromResult(new SubscriptionLookup(credential.AccountID, "plus", null, "fixture", false));
+    }
 }

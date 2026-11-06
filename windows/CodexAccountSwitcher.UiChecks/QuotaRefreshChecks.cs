@@ -51,6 +51,7 @@ internal static class QuotaRefreshChecks
             var input = All<TextBox>(selector).Single();
             Check(choice.Visibility == Visibility.Collapsed && input.IsVisible && input.IsKeyboardFocusWithin, "Choosing custom replaces the dropdown with a focused minutes input.");
             Check(client.Values.Count == count, "Entering custom mode does not save an invented interval.");
+            Check(All<TextBlock>(selector).Any(text => text.Text == "已生效") && All<TextBlock>(selector).Any(text => text.Text == "当前已生效：5 分钟"), "An unchanged custom interval is labelled active instead of showing an unexplained disabled Save button.");
             foreach (var invalid in new[] { "", " ", "0", "-1", "1.5", "1441", "abc" }) {
                 input.Text = invalid; Enter(input); Pump();
                 Check(client.Values.Count == count && All<TextBlock>(selector).Any(text => text.IsVisible && text.Text.Contains("1–1440")), "Invalid custom input is explained without changing the saved interval: " + invalid);
@@ -65,13 +66,21 @@ internal static class QuotaRefreshChecks
             Check(client.Values.Count == count && Math.Abs(scroll.VerticalOffset - draftOffset) < 1, "Reparenting does not trigger a synthetic blur save or scroll jump.");
             Enter(input); Pump();
             Check(client.Values.Last() == 17 && client.State.Settings.QuotaRefreshIntervalMinutes == 17 && input.IsVisible, "Enter saves custom minutes and keeps the input presentation.");
+            var saveButton = All<Button>(selector).Single(button => AutomationProperties.GetName(button) == "保存刷新间隔");
+            input.Focus(); input.Text = "1"; Pump();
+            Check(saveButton.IsEnabled && All<TextBlock>(selector).Any(text => text.Text.Contains("未保存") && text.Text.Contains("17")), "Typing one minute exposes an enabled Save button and the unchanged current value.");
+            count = client.Values.Count; saveButton.Focus(); Pump();
+            Check(client.Values.Count == count, "Moving focus to Save does not trigger a blur save that disables the button before its click.");
+            saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+            Check(client.State.Settings.QuotaRefreshIntervalMinutes == 1 && !saveButton.IsEnabled && All<TextBlock>(selector).Any(text => text.Text == "已保存 · 1 分钟" && Equals(text.Foreground, app.Resources["Success"])), "Clicking Save persists one minute and explicitly confirms success.");
+            input.Text = "17"; Enter(input); Pump();
             input.Focus(); input.Text = "1"; var blurTarget = All<CheckBox>(window).Last(); var focusMoved = blurTarget.Focus(); Pump();
             Console.WriteLine($"Quota blur: moved={focusMoved}, targetEnabled={blurTarget.IsEnabled}, targetVisible={blurTarget.IsVisible}, targetFocusable={blurTarget.Focusable}, inputFocused={input.IsKeyboardFocusWithin}, saved={client.State.Settings.QuotaRefreshIntervalMinutes}, values={string.Join(',', client.Values)}.");
             Check(!input.IsKeyboardFocusWithin, "The blur-save test actually moves keyboard focus to another setting.");
             Check(client.Values.Last() == 1 && client.State.Settings.QuotaRefreshIntervalMinutes == 1, "Real focus loss saves the one-minute lower bound.");
             input.Focus(); input.Text = "1440"; Enter(input); Pump();
             Check(client.Values.Last() == 1440, "The custom upper bound of 1440 minutes is accepted.");
-            var arrow = All<Button>(selector).Single();
+            var arrow = All<Button>(selector).Single(button => AutomationProperties.GetName(button) == "选择刷新间隔");
             arrow.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
             Check(arrow.ContextMenu?.IsOpen == true, "The custom input retains an accessible route back to presets.");
             ((MenuItem)arrow.ContextMenu!.Items[3]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); arrow.ContextMenu.IsOpen = false; Pump();
@@ -85,18 +94,41 @@ internal static class QuotaRefreshChecks
             Check(client.Values.Count == count + 1 && !selector.IsEnabled && client.State.Settings.QuotaRefreshIntervalMinutes == 19, "A pending save disables repeated submissions without claiming the setting was already persisted.");
             client.Release(); Pump();
             Check(client.State.Settings.QuotaRefreshIntervalMinutes == 23 && selector.IsEnabled, "The editor recovers when the awaited setting save finishes.");
+            client.IgnoreSave = true; input.Text = "29"; saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+            Check(client.State.Settings.QuotaRefreshIntervalMinutes == 23 && All<TextBlock>(selector).Any(text => text.Text.Contains("保存失败") && text.Text.Contains("23")) && !All<TextBlock>(selector).Any(text => text.Text == "已保存 · 29 分钟"), "A command that completes without applying the setting cannot falsely report success.");
+            client.IgnoreSave = false; saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+            Check(client.State.Settings.QuotaRefreshIntervalMinutes == 29 && All<TextBlock>(selector).Any(text => text.Text == "已保存 · 29 分钟"), "The explicit Save button can retry an unconfirmed setting.");
 
             foreach (var dark in new[] { false, true }) {
                 native.ThemePreference = dark ? "dark" : "light"; window.Width = 480; Pump();
-                input.Text = "19"; input.BringIntoView(); Pump();
+                input.Text = dark ? "21" : "19"; input.BringIntoView(); Pump();
                 Capture(window, Path.Combine(output, "quota-custom-valid-" + (dark ? "dark" : "light") + ".png"));
+                var savePosition = saveButton.TranslatePoint(new Point(), selector);
+                Check(savePosition.X >= 0 && savePosition.X + saveButton.ActualWidth <= selector.ActualWidth && input.ActualWidth >= 70, "The explicit Save button and integrated editor fit at the minimum window width.");
+                saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                Capture(window, Path.Combine(output, "quota-custom-saved-" + (dark ? "dark" : "light") + ".png"));
+                arrow.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                Check(arrow.ContextMenu!.IsOpen && Equals(arrow.ContextMenu.Background, app.Resources["InputSurface"]), "The preset popup uses the active light or dark surface.");
+                Capture(arrow.ContextMenu, Path.Combine(output, "quota-presets-menu-" + (dark ? "dark" : "light") + ".png")); arrow.ContextMenu.IsOpen = false; Pump();
                 input.Text = "0"; Enter(input); Pump(); input.BringIntoView(); Pump();
                 Check(selector.ActualWidth <= window.ActualWidth && All<TextBox>(selector).Single().ActualWidth >= 60, "The custom editor remains usable in the minimum-width settings window.");
                 Capture(window, Path.Combine(output, "quota-custom-" + (dark ? "dark" : "light") + ".png"));
+                client.Fail = true; input.Text = "22"; saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                Capture(window, Path.Combine(output, "quota-custom-failed-" + (dark ? "dark" : "light") + ".png")); client.Fail = false;
             }
+            input.Text = "0"; Enter(input); Pump();
             client.State = client.State with { Settings = client.State.Settings with { Language = "english" } }; client.Notify(); Pump();
             Check(AutomationProperties.GetName(input) == "Custom refresh minutes" && All<TextBlock>(selector).Any(text => text.Text == "minutes") && All<TextBlock>(selector).Any(text => text.IsVisible && text.Text.Contains("whole number")), "English translates the field, minute unit and validation message.");
             Capture(window, Path.Combine(output, "quota-custom-english.png"));
+            var reopenedClient = new Client { State = client.State with { Settings = client.State.Settings with { Language = "simplifiedChinese", QuotaRefreshIntervalMinutes = 1 } } };
+            var reopened = new MainWindow(reopenedClient, native) { Width = 480, Height = 650 };
+            try {
+                reopened.Show(); reopened.Navigate("settings"); Pump();
+                var freshSelector = All<QuotaRefreshSelector>(reopened).Single(); freshSelector.BringIntoView(); Pump();
+                Check(All<TextBox>(freshSelector).Single().Text == "1" && All<TextBlock>(freshSelector).Any(text => text.Text == "当前已生效：1 分钟") && All<TextBlock>(freshSelector).Any(text => text.Text == "已生效"), "Opening an already-saved one-minute interval explicitly shows that it is active.");
+                Check(reopenedClient.Values.Count == 0, "Showing an effective one-minute setting does not issue another backend save.");
+                Capture(reopened, Path.Combine(output, "quota-custom-active-one-minute.png"));
+            } finally { reopened.CloseForExit(); window.Activate(); }
             NetworkFailurePresentation(app, window, client, output);
             Console.WriteLine($"PASS: {assertions} quota-refresh UI assertions; presets, custom validation, Enter/blur saves, failure retry, stable focus/scroll and dark/light localization (synthetic only).");
         } finally {
@@ -149,7 +181,7 @@ internal static class QuotaRefreshChecks
         var frame = new DispatcherFrame(); var timer = new DispatcherTimer(DispatcherPriority.ApplicationIdle) { Interval = TimeSpan.FromMilliseconds(65) };
         timer.Tick += (_, _) => frame.Continue = false; timer.Start(); try { Dispatcher.PushFrame(frame); } finally { timer.Stop(); }
     }
-    private static void Capture(Window window, string path) {
+    private static void Capture(FrameworkElement window, string path) {
         window.UpdateLayout(); var visual = new DrawingVisual();
         using (var drawing = visual.RenderOpen()) drawing.DrawRectangle(new VisualBrush(window), null, new Rect(0, 0, window.ActualWidth, window.ActualHeight));
         var bitmap = new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth * 1.5), (int)Math.Ceiling(window.ActualHeight * 1.5), 144, 144, PixelFormats.Pbgra32); bitmap.Render(visual);
@@ -158,7 +190,7 @@ internal static class QuotaRefreshChecks
     private sealed class Client : IAccountClient {
         public AccountSnapshot State { get; set; } = AccountSnapshot.Empty with { Settings = new("simplifiedChinese") };
         public readonly List<int> Values = [];
-        public bool Fail, Hold;
+        public bool Fail, Hold, IgnoreSave;
         private TaskCompletionSource? pending;
         public event Action? Changed;
         public void Notify() => Changed?.Invoke();
@@ -167,6 +199,7 @@ internal static class QuotaRefreshChecks
             if (command != "quotaRefreshInterval") throw new Exception("Unexpected synthetic command: " + command);
             var number = int.Parse(language!, CultureInfo.InvariantCulture); Values.Add(number);
             if (Fail) throw new IOException("Synthetic save failure.");
+            if (IgnoreSave) return;
             if (Hold) { pending = new(TaskCreationOptions.RunContinuationsAsynchronously); await pending.Task; pending = null; }
             State = State with { Settings = State.Settings with { QuotaRefreshIntervalMinutes = number } }; Notify();
         }

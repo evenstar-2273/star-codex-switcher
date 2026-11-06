@@ -65,9 +65,10 @@ public static class AccountVisuals
 
     public static string ResetExpiryLabel(DateTimeOffset? until, DateTimeOffset now, bool chinese, bool compact = false)
     {
-        if (until is not { } expiry) return chinese ? "重置机会：暂无到期信息" : "Reset credits: no expiry information";
-        var prefix = chinese ? (compact ? "重置机会最早到期 " : "重置机会最早到期：") : "Earliest reset credit expiry: ";
-        var suffix = expiry <= now ? (chinese ? "（已到期，待刷新）" : " (Expiry reached; refresh to confirm)") : "";
+        if (until is not { } expiry) return chinese ? "重置卡：暂无到期信息" : "Reset credits: no expiry information";
+        var prefix = chinese ? (compact ? "重置卡最早到期 " : "重置卡最早到期：") : "Earliest reset credit expiry: ";
+        var suffix = expiry <= now ? (chinese ? "（已到期，待刷新）" : " (Expiry reached; refresh to confirm)")
+            : (chinese ? "（" : " (") + QuotaCountdown(expiry, now, chinese) + (chinese ? "）" : ")");
         return prefix + expiry.ToLocalTime().ToString("MM-dd HH:mm") + suffix;
     }
 
