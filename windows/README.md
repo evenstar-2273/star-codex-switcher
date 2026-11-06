@@ -10,6 +10,6 @@
 - [界面验证](../design-qa.md)
 - [运行时许可](licenses/README.md)
 
-1.0.1 安装包为 `Star-Codex-Switcher-1.0.1-Setup-x64.exe`，安装后的主程序为 `StarCodexSwitcher.exe`；源码包为 `Star-Codex-Switcher-1.0.1-source.zip`。窗口标题和快捷方式统一为 `Star Codex Switcher`。
+当前安装包为 `Star-Codex-Switcher-1.0.4-Setup-x64.exe`，安装后的主程序为 `StarCodexSwitcher.exe`。源码使用对应 GitHub Release 自带的 **Source code (zip)** 或 **Source code (tar.gz)** 下载，不再单独上传源码包。窗口标题和快捷方式统一为 `Star Codex Switcher`。
 
 新用户默认安装到 `%LOCALAPPDATA%\Programs\Star Codex Switcher`，旧用户升级沿用原安装位置，并保留账号数据和设置。运行时随包附带，用户不需要安装 .NET SDK 或 Swift 工具链。源码构建与发布步骤统一维护在构建文档中。

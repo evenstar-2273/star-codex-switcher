@@ -32,7 +32,7 @@
 
 历史便携版的 EXE 可直接运行，安装版则会建立固定安装目录、快捷方式和卸载入口。今后的常规分发与自动更新以安装版为主。
 
-从 1.0.1 起，窗口标题、快捷方式和安装显示名称统一为 `Star Codex Switcher`，主程序为 `StarCodexSwitcher.exe`。新用户默认安装到 `%LOCALAPPDATA%\Programs\Star Codex Switcher`，也可在安装时选择路径；旧用户升级沿用已有安装位置。需要源码时下载 `Star-Codex-Switcher-1.0.4-source.zip`，它不是安装包。
+从 1.0.1 起，窗口标题、快捷方式和安装显示名称统一为 `Star Codex Switcher`，主程序为 `StarCodexSwitcher.exe`。新用户默认安装到 `%LOCALAPPDATA%\Programs\Star Codex Switcher`，也可在安装时选择路径；旧用户升级沿用已有安装位置。需要源码时，在对应 GitHub Release 下载自动提供的 **Source code (zip)** 或 **Source code (tar.gz)**；它们不是安装包。
 
 ## 账号数据与导入
 
@@ -60,7 +60,7 @@
 
 在设置中手动“检查更新”，仍可查看并安装已经跳过的版本。
 
-更新源固定为本仓库，不在设置页提供自定义服务器地址。软件内新版本提示、[更新记录](CHANGELOG.md) 和 Release 说明对应同一版本。发布时同步上传安装包、源码包、校验文件与更新清单，详见 [发布文档](docs/windows-build-release.md)。
+更新源固定为本仓库，不在设置页提供自定义服务器地址。软件内新版本提示、[更新记录](CHANGELOG.md) 和 Release 说明对应同一版本。从 1.0.4 起，发布时只上传安装包、校验文件与更新清单三项资产，源码使用 GitHub 自带的 Source code 下载，详见 [发布文档](docs/windows-build-release.md)。
 
 ## 开发文档
 
