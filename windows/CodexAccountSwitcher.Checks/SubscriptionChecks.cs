@@ -10,7 +10,7 @@ internal static class SubscriptionChecks
     public static async Task<int> RunAsync()
     {
         try {
-            ParseChecks(); PlanChecks(); await HttpChecks(); await GuardedChecks();
+            ParseChecks(); PlanChecks(); await HttpChecks(); await LoginPeriodChecks(); await GuardedChecks(); await GuardedLoginPeriodChecks();
             Console.WriteLine($"PASS: {passed} subscription selection/date/HTTP/cache assertions (synthetic only, GET fixtures)."); return 0;
         } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
     }
@@ -32,6 +32,9 @@ internal static class SubscriptionChecks
         Require(OfficialSubscriptionReader.ParseSubscriptions("{}", "workspace").ActiveUntil == null, "Empty subscription data never invents an expiry.");
         Require(OfficialSubscriptionReader.ParseSubscriptions("{\"active_until\":0}", "workspace").ActiveUntil == null, "Zero is not a meaningful billing expiry.");
         Require(OfficialSubscriptionReader.ParseSubscriptions("{\"active_until\":\"not-a-date\"}", "workspace").ActiveUntil == null, "Unknown dates are not shifted by a billing month.");
+        foreach (var ambiguous in new[] { "2026-12-01", "2026-12-01T08:26:00", "2026-12-01 08:26:00" })
+            Require(OfficialSubscriptionReader.ParseSubscriptions(JsonSerializer.Serialize(new { active_until = ambiguous }), "workspace").ActiveUntil == null,
+                "A date with no explicit timezone cannot silently become a different UTC subscription instant.");
         var expected = DateTimeOffset.Parse("2026-12-01T08:26:00Z");
         foreach (var timestamp in new[] { expected.ToUnixTimeSeconds().ToString(), expected.ToUnixTimeMilliseconds().ToString(), "\"" + expected.ToUnixTimeSeconds() + "\"" })
             Require(OfficialSubscriptionReader.ParseSubscriptions("{\"active_until\":" + timestamp + "}", "workspace").ActiveUntil == expected, "Seconds, milliseconds and numeric strings normalize to the same instant.");
@@ -156,10 +159,72 @@ internal static class SubscriptionChecks
                 "An old in-flight billing result cannot overwrite renewed expiry or incorrectly turn the badge free.");
         } finally { SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root); }
     }
-    private static LoginCredential Credential(string? idOrg, string? accessOrg)
+    private static async Task LoginPeriodChecks()
+    {
+        foreach (var (raw, local) in new[] {
+            ("2026-12-06T07:55:21+00:00", "2026-12-06T15:55:21+08:00"),
+            ("2026-11-22T10:11:13Z", "2026-11-22T18:11:13+08:00"),
+            ("2026-12-05T04:02:14Z", "2026-12-05T12:02:14+08:00") }) {
+            var credential = Credential(null, null, raw);
+            using var reader = new OfficialSubscriptionReader(new Handler(_ => throw new Exception("A future login period must not be replaced by a different entitlement date.")), () => Now);
+            var result = await reader.ReadAsync(credential, default);
+            Require(result.ActiveUntil == DateTimeOffset.Parse(local) && result.ActiveUntil?.ToOffset(TimeSpan.FromHours(8)).Hour == DateTimeOffset.Parse(local).Hour,
+                "Explicit UTC login periods retain their exact local hour without a fixed timezone correction.");
+            Require(result.Source == "login_snapshot" && !result.IsVerified && result.PlanType == "prolite", "A future login period records its actual source and is not labelled an online verification.");
+        }
+        var boundary = DateTimeOffset.Parse("2026-12-06T07:55:21Z");
+        var clock = boundary.AddSeconds(-1); var calls = 0;
+        using (var reader = new OfficialSubscriptionReader(new Handler(_ => { calls++; return Response(200, Accounts("2027-01-06T07:55:21Z")); }), () => clock)) {
+            var credential = Credential(null, null, boundary.ToString("O"));
+            Require((await reader.ReadAsync(credential, default)).Source == "login_snapshot" && calls == 0, "The current login period is usable until its precise end, regardless of token issue date.");
+            clock = boundary;
+            var renewed = await reader.ReadAsync(credential, default);
+            Require(calls == 1 && renewed.IsVerified && renewed.Source == "accounts_check" && renewed.ActiveUntil == DateTimeOffset.Parse("2027-01-06T07:55:21Z"),
+                "At the exact end of the login period, a new online query can discover a renewed subscription.");
+        }
+        foreach (var until in new string?[] { null, "", "invalid", "2026-12-06T07:55:21", "2026-11-01T07:55:21Z" }) {
+            var count = 0;
+            using var reader = new OfficialSubscriptionReader(new Handler(_ => Response(200, ++count == 1 ? Accounts() : "{\"active_until\":\"2026-12-06T07:55:21Z\"}")), () => Now);
+            var result = await reader.ReadAsync(Credential(null, null, until), default);
+            Require(count == 2 && result.Source == "subscriptions" && result.IsVerified && result.ActiveUntil == boundary,
+                "Missing, invalid, ambiguous or expired login periods use account check and subscription fallback, never an invented expiry.");
+        }
+        var login = new SubscriptionSnapshot(boundary, boundary.AddMinutes(-1), "login_snapshot", false);
+        Require(!GuardedAccountClient.ShouldRefreshSubscription("login_snapshot", login, boundary.AddMinutes(-1), boundary.AddSeconds(-1), false), "An unexpired cached login period avoids redundant background work.");
+        Require(GuardedAccountClient.ShouldRefreshSubscription("login_snapshot", login, boundary.AddMinutes(-1), boundary, false), "Expiry invalidates the login-period cache even before its 30-minute lifetime ends.");
+        Require(GuardedAccountClient.ShouldRefreshSubscription("login_snapshot", login, boundary.AddMinutes(-1), boundary.AddSeconds(-1), true), "Manual refresh bypasses the cache while keeping the same source selection rule.");
+        Require(GuardedAccountClient.ShouldRefreshSubscription("unavailable", null, Now.AddMinutes(-30), Now, false), "A missing-period result remains retryable after the cache lifetime.");
+    }
+    private static async Task GuardedLoginPeriodChecks()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "switcher-login-period-check-" + Guid.NewGuid());
+        var id = Guid.NewGuid(); var until = DateTimeOffset.UtcNow.AddDays(10); var credential = Credential(null, null, until.ToString("O"));
+        var profile = Path.Combine(root, "data", "accounts", id.ToString().ToUpperInvariant()); Directory.CreateDirectory(profile);
+        File.WriteAllBytes(Path.Combine(profile, "auth.json"), credential.Bytes);
+        var state = AccountSnapshot.Empty with { Accounts = [new(new(id, "Fixture", "fixture@example.test"), "F", null, null)], ActiveAccountID = id };
+        var reads = 0; var httpCalls = 0;
+        using var official = new OfficialSubscriptionReader(new Handler(_ => { httpCalls++; return Response(200, Accounts("2099-01-01T00:00:00Z")); }));
+        var reader = new Reader((login, ct) => { reads++; return official.ReadAsync(login, ct); });
+        try {
+            await using var client = new GuardedAccountClient(Path.Combine(root, "data"), Path.Combine(root, "active"), () => new Runtime(state),
+                new Credits(), (_, _) => Task.FromResult(new Usage(81, Now.AddDays(4), null, null, 2, null, "prolite")), new Validator(), reader);
+            await client.InitializeAsync(); await Until(() => client.State.Accounts[0].SubscriptionStatus == "login_snapshot");
+            var first = client.State.Accounts[0];
+            Require(first.Subscription is { Source: "login_snapshot", IsVerified: false } && first.Subscription.ActiveUntil == until && first.PlanType == "prolite",
+                "The account state preserves the exact login period and its non-online source without changing the plan.");
+            await client.CommandAsync("refresh", id);
+            Require(reads == 2 && httpCalls == 0 && client.State.Accounts[0].Subscription?.ActiveUntil == until, "Manual refresh re-reads current credentials without replacing their future period with a different entitlement expiry.");
+            var expired = Credential(null, null, DateTimeOffset.UtcNow.AddDays(-1).ToString("O"));
+            File.WriteAllBytes(Path.Combine(profile, "auth.json"), expired.Bytes);
+            await client.CommandAsync("refresh", id);
+            Require(httpCalls == 1 && client.State.Accounts[0].Subscription is { IsVerified: true, Source: "accounts_check" }, "Credential changes discard the cached login period and an expired replacement performs online reconciliation.");
+            Require(File.ReadAllBytes(Path.Combine(profile, "auth.json")).SequenceEqual(expired.Bytes), "Login-period selection never rewrites authentication data.");
+        } finally { SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root); }
+    }
+    private static LoginCredential Credential(string? idOrg, string? accessOrg, string? subscriptionUntil = null)
     {
         string Token(string? org) {
-            var claims = JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?> { ["email"] = "fixture@example.test", ["https://api.openai.com/auth"] = new { chatgpt_account_id = "workspace", organization_id = org, chatgpt_plan_type = "prolite" } });
+            var claims = JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?> { ["email"] = "fixture@example.test", ["https://api.openai.com/auth"] = new { chatgpt_account_id = "workspace", organization_id = org, chatgpt_plan_type = "prolite", chatgpt_subscription_active_until = subscriptionUntil } });
             return "e30." + Convert.ToBase64String(claims).TrimEnd('=').Replace('+', '-').Replace('/', '_') + ".fixture";
         }
         return LoginCredential.Parse(JsonSerializer.SerializeToUtf8Bytes(new { tokens = new { account_id = "workspace", id_token = Token(idOrg), access_token = Token(accessOrg) } }));

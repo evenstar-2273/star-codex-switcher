@@ -28,6 +28,26 @@ internal static class LoginCancellationChecks
             Check(!client.State.IsAddingAccount && !client.State.IsMutating && fixture.Runtimes.Count == 1, "Responsive cancellation unlocks controls without restarting the host.");
             fixture.CheckCredential();
         }
+        using (var fixture = new ManagedFixture("held-before-snapshot")) {
+            await using var client = fixture.Client(); await client.InitializeAsync();
+            await Until(() => client.State.Accounts[0].Usage != null);
+            var notifiedPending = false;
+            client.Changed += () => notifiedPending |= client.State.IsAddingAccount && !client.State.IsMutating;
+            var add = client.CommandAsync("add");
+            Check(client.State.IsAddingAccount && !fixture.Runtimes[0].State.IsAddingAccount && !add.IsCompleted,
+                "A sent add is visible as pending before the host's first snapshot or acknowledgement.");
+            Check(!client.State.IsMutating, "Waiting for the add acknowledgement does not disable the cancellation control.");
+            Check(notifiedPending, "Beginning an add immediately notifies the UI of its cancellable pending state.");
+            var usageCalls = fixture.UsageCalls;
+            fixture.InvalidateSavedQuota(); fixture.Runtimes[0].PublishUnchanged();
+            Check(fixture.UsageCalls == usageCalls, "Even an invalidated quota is not read while an add is waiting for its first host snapshot.");
+            await client.CommandAsync("cancelAdd").WaitAsync(TimeSpan.FromSeconds(2));
+            await add.WaitAsync(TimeSpan.FromSeconds(2));
+            Check(!client.State.IsAddingAccount && !client.State.IsMutating && client.State.Error == null &&
+                fixture.Runtimes.Count == 2 && fixture.Runtimes[0].Stopped && fixture.MaximumRunning == 1,
+                "Cancelling an unacknowledged add safely restores usable state after stopping the old runtime.");
+            fixture.CheckCredential();
+        }
         foreach (var mode in new[] { "no-ack", "ack-but-pending" }) {
             using var fixture = new ManagedFixture(mode);
             await using var client = fixture.Client(); await client.InitializeAsync();
@@ -96,6 +116,7 @@ internal static class LoginCancellationChecks
                 await client.InitializeAsync().WaitAsync(TimeSpan.FromSeconds(15));
                 var originalCount = client.State.Accounts.Length;
                 await client.CommandAsync("add").WaitAsync(TimeSpan.FromSeconds(3));
+                Check(client.State.IsAddingAccount, "The actual host publishes its adding snapshot before completing the add acknowledgement.");
                 await browserStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 await client.CommandAsync("cancelAdd").WaitAsync(TimeSpan.FromSeconds(3));
                 await Until(() => !client.State.IsAddingAccount);
@@ -139,20 +160,23 @@ internal static class LoginCancellationChecks
         private readonly bool hasActiveCredential;
         private readonly byte[] original = GuardedChecks.Credential("original-login").Bytes;
         private readonly AccountSnapshot snapshot;
+        private readonly string savedCredentialPath;
         public readonly List<Runtime> Runtimes = [];
         public bool FailRestart;
-        public int Running, MaximumRunning;
+        public int Running, MaximumRunning, UsageCalls;
         public ManagedFixture(string mode, bool hasActiveCredential = true) {
             this.mode = mode; this.hasActiveCredential = hasActiveCredential; var id = Guid.NewGuid();
             Directory.CreateDirectory(Path.Combine(root, "active"));
             if (hasActiveCredential) File.WriteAllBytes(Path.Combine(root, "active", "auth.json"), original);
-            var saved = Path.Combine(root, "data", "accounts", id.ToString().ToUpperInvariant()); Directory.CreateDirectory(saved); File.WriteAllBytes(Path.Combine(saved, "auth.json"), original);
+            var saved = Path.Combine(root, "data", "accounts", id.ToString().ToUpperInvariant()); Directory.CreateDirectory(saved);
+            savedCredentialPath = Path.Combine(saved, "auth.json"); File.WriteAllBytes(savedCredentialPath, original);
             snapshot = AccountSnapshot.Empty with { Accounts = [new(new(id, "Original fixture", "fixture@example.test"), "F", null, null)], ActiveAccountID = hasActiveCredential ? id : null };
         }
         public GuardedAccountClient Client() => new(Path.Combine(root, "data"), Path.Combine(root, "active"), () => {
             if (FailRestart && Runtimes.Count > 0) throw new IOException("fixture restart failed");
             var runtime = new Runtime(this, snapshot, mode); Runtimes.Add(runtime); return runtime;
-        }, new Credits(), (_, _) => Task.FromResult(new Usage(50, DateTimeOffset.UtcNow.AddDays(1), null, null, 0)), new Validator(), loginCancellationTimeout: TimeSpan.FromMilliseconds(80));
+        }, new Credits(), (_, _) => { Interlocked.Increment(ref UsageCalls); return Task.FromResult(new Usage(50, DateTimeOffset.UtcNow.AddDays(1), null, null, 0)); }, new Validator(), loginCancellationTimeout: TimeSpan.FromMilliseconds(80));
+        public void InvalidateSavedQuota() => File.AppendAllText(savedCredentialPath, "\n");
         public void CheckCredential() => Check(hasActiveCredential ? File.ReadAllBytes(Path.Combine(root, "active", "auth.json")).SequenceEqual(original)
             : !File.Exists(Path.Combine(root, "active", "auth.json")), "Managed cancellation never overwrites or creates the active login.");
         public void Dispose() => SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root);
@@ -178,6 +202,7 @@ internal static class LoginCancellationChecks
             return Task.CompletedTask;
         }
         public void PublishLate() { State = State with { IsAddingAccount = true, Accounts = [] }; Changed?.Invoke(); }
+        public void PublishUnchanged() => Changed?.Invoke();
         public ValueTask DisposeAsync() {
             if (!Stopped) {
                 Stopped = true; fixture.Running--;

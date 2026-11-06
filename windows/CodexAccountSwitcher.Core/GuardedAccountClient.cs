@@ -42,6 +42,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             var state = initialized && core != null ? core.State : pausedState;
             return state with {
                 IsMutating = busy || cancellingLogin || state.IsMutating, Error = error ?? state.Error,
+                IsAddingAccount = state.IsAddingAccount || activeCommand == "add",
                 Accounts = state.Accounts.Select(row => {
                     var current = directUsage.TryGetValue(row.Profile.Id, out var entry)
                         ? row with { Usage = entry.Usage ?? row.Usage, UsageError = entry.Error, UsageStatus = entry.Usage != null ? "loaded" : row.Usage != null ? row.UsageStatus : "unavailable" }
@@ -67,7 +68,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private void Notify() {
         DetectChangedCredentials();
         Changed?.Invoke();
-        if (!directUsageEnabled || usageLifetime.IsCancellationRequested || busy || cancellingLogin || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount) return;
+        if (!directUsageEnabled || usageLifetime.IsCancellationRequested || busy || cancellingLogin || activeCommand == "add" || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount) return;
         foreach (var row in core.State.Accounts) {
             var id = row.Profile.Id;
             if (resetNeedsRefresh.ContainsKey(id)) continue;
@@ -132,7 +133,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private async Task RefreshSubscriptionAsync(Guid id, LoginCredential credential, int generation, bool force) {
         var checkedAt = DateTimeOffset.UtcNow;
         subscriptions.TryGetValue(id, out var previous);
-        if (!force && previous != null && previous.Status != "checking" && checkedAt - previous.At < TimeSpan.FromMinutes(30)) return;
+        if (previous != null && !ShouldRefreshSubscription(previous.Status, previous.Snapshot, previous.At, checkedAt, force)) return;
         lock (usageStateLock) {
             if (generation != usageGeneration) return;
             subscriptions[id] = new(previous?.Snapshot, previous?.PlanType, "checking", null, previous?.At ?? checkedAt);
@@ -140,9 +141,9 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         SubscriptionEntry next;
         try {
             var result = await subscriptionReader.ReadAsync(credential, usageLifetime.Token);
-            var snapshot = result.ActiveUntil is { } until ? new SubscriptionSnapshot(until, checkedAt, result.Source, IsVerified: true) : null;
+            var snapshot = result.ActiveUntil is { } until ? new SubscriptionSnapshot(until, checkedAt, result.Source, result.IsVerified) : null;
             var retained = previous?.Snapshot is { IsVerified: true } last && last.ActiveUntil > checkedAt ? last : null;
-            next = snapshot != null ? new(snapshot, result.PlanType, "verified", null, checkedAt)
+            next = snapshot != null ? new(snapshot, result.PlanType, result.IsVerified ? "verified" : "login_snapshot", null, checkedAt)
                 : new(retained, result.PlanType ?? previous?.PlanType, retained == null ? "unavailable" : "stale",
                     "官方订阅接口暂未返回有效期，请稍后刷新核验。", checkedAt);
         } catch (OperationCanceledException) when (usageLifetime.IsCancellationRequested) { return; }
@@ -160,6 +161,9 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         }
         context.Post(_ => { if (!usageLifetime.IsCancellationRequested) Changed?.Invoke(); }, null);
     }
+    internal static bool ShouldRefreshSubscription(string status, SubscriptionSnapshot? snapshot,
+        DateTimeOffset cachedAt, DateTimeOffset now, bool force) => force || status == "checking" ||
+        snapshot is { Source: "login_snapshot" } login && login.ActiveUntil <= now || now - cachedAt >= TimeSpan.FromMinutes(30);
     private int AdvanceUsageGeneration(bool clear = false) {
         lock (usageStateLock) {
             if (clear) { directUsage.Clear(); planHints.Clear(); credentialFingerprints.Clear(); subscriptions.Clear(); }
@@ -278,6 +282,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         activeCommand = command;
         try {
             if (core == null) throw new IOException("Account core is unavailable. Restart the app.");
+            if (command == "add") Notify();
             if (command == "dismissError") error = null;
             if (command == "resetQuota") { if (accountID is { } resetId) await ResetQuotaAsync(resetId); return; }
             if (command == "refresh" && directUsageEnabled) {

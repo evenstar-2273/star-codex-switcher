@@ -2,17 +2,18 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace CodexAccountSwitcher.Core;
 
-public sealed record SubscriptionLookup(string? AccountID, string? PlanType, DateTimeOffset? ActiveUntil, string Source);
+public sealed record SubscriptionLookup(string? AccountID, string? PlanType, DateTimeOffset? ActiveUntil, string Source, bool IsVerified = true);
 
 public interface ISubscriptionReader
 {
     Task<SubscriptionLookup> ReadAsync(LoginCredential credential, CancellationToken ct);
 }
 
-// Reads current subscription dates from authenticated account responses.
+// Keeps a current login's subscription period until it expires, then queries account responses.
 // It never refreshes tokens, changes the selected workspace, or infers a billing period.
 public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposable
 {
@@ -28,6 +29,9 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
 
     public async Task<SubscriptionLookup> ReadAsync(LoginCredential credential, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        if (credential.SubscriptionActiveUntil is { } loginUntil && loginUntil > now())
+            return new(credential.AccountID, credential.PlanType, loginUntil, "login_snapshot", IsVerified: false);
         var offset = -(int)TimeZoneInfo.Local.GetUtcOffset(now()).TotalMinutes;
         var accounts = await GetAsync(CheckPath, "timezone_offset_min=" + offset.ToString(CultureInfo.InvariantCulture), credential, ct);
         var selected = ParseAccountCheck(accounts, credential.AccountID, credential.OrganizationID);
@@ -80,9 +84,9 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
                 var account = Field(row, "account") is { ValueKind: JsonValueKind.Object } inner ? inner : row;
                 var entitlement = Field(row, "entitlement");
                 var plan = entitlement is { } ent ? Text(ent, "subscription_plan") : null;
-                var expiry = entitlement is { } grant ? Date(Field(grant, "expires_at")) : null;
+                var expiry = entitlement is { } grant ? SubscriptionDate.Parse(Field(grant, "expires_at")) : null;
                 records.Add(new(key, Text(account, "account_id", "id", "chatgpt_account_id", "workspace_id"),
-                    plan ?? Text(account, "plan_type", "planType"), expiry ?? Date(Field(account, "expires_at")),
+                    plan ?? Text(account, "plan_type", "planType"), expiry ?? SubscriptionDate.Parse(Field(account, "expires_at")),
                     Field(account, "is_default") is { ValueKind: JsonValueKind.True }));
             }
             var selected = records.FirstOrDefault(row => organizationId != null && row.Key == organizationId)
@@ -105,7 +109,7 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object) throw new FormatException();
             return new(accountId, Text(root, "subscription_plan", "plan_type"),
-                Date(Field(root, "active_until")) ?? Date(Field(root, "expires_at")), "subscriptions");
+                SubscriptionDate.Parse(Field(root, "active_until")) ?? SubscriptionDate.Parse(Field(root, "expires_at")), "subscriptions");
         } catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException) {
             throw new SubscriptionReadException("订阅响应格式无法识别，有效期仍待核验。");
         }
@@ -123,7 +127,12 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
         }
         return null;
     }
-    private static DateTimeOffset? Date(JsonElement? value)
+    public void Dispose() => http.Dispose();
+}
+
+internal static class SubscriptionDate
+{
+    internal static DateTimeOffset? Parse(JsonElement? value)
     {
         if (value is not { } item) return null;
         long number;
@@ -133,10 +142,11 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
             try { return number > 999999999999 ? DateTimeOffset.FromUnixTimeMilliseconds(number) : DateTimeOffset.FromUnixTimeSeconds(number); }
             catch (ArgumentOutOfRangeException) { return null; }
         }
-        return item.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(item.GetString(), CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var date) ? date : null;
+        if (item.ValueKind != JsonValueKind.String || item.GetString()?.Trim() is not { Length: > 0 and <= 128 } text) return null;
+        // A date without an offset is ambiguous; do not silently reinterpret it as UTC.
+        if (!Regex.IsMatch(text, @"^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$")) return null;
+        return DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var date) ? date : null;
     }
-    public void Dispose() => http.Dispose();
 }
 
 public sealed class SubscriptionReadException(string message) : IOException(message);

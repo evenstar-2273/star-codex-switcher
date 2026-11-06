@@ -17,6 +17,17 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length == 4 && args[0] == "--test-update-prompt-child") {
+            try { return UpdatePromptChecks.RunChild(args[1], args[2], args[3] == "yes"); }
+            catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
+        if (args.Length >= 1 && args[0] == "--test-update-prompts") {
+            try {
+                var target = Path.GetFullPath(args.ElementAtOrDefault(1) ?? "windows/artifacts/update-prompts");
+                var fixtureApp = new App(false); fixtureApp.InitializeComponent(); fixtureApp.ApplyPalette(false);
+                UpdatePromptChecks.Run(fixtureApp, target); return 0;
+            } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
         if (args.Contains("--check-plan-badges")) {
             try { PlanVisualChecks.Run(); return 0; }
             catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
@@ -76,6 +87,7 @@ internal static class Program
             Assert(window.Icon != null, "The taskbar and title bar must use the packaged application logo.");
             BrandingChecks.Run();
             LanguageChecks.Run(native, output);
+            SubscriptionPresentationChecks.Run(native, output);
             Render(window, Path.Combine(output, "accounts-zh.png"));
             Assert(window.ResizeMode == ResizeMode.CanResize && window.MinWidth >= 420,
                 "Home is a normal resizable desktop window with a usable minimum width.");
@@ -215,6 +227,7 @@ internal static class Program
             window.Close();
             Assert(!window.IsVisible && !closed, "An active operation can continue while the window is hidden.");
             client.State = client.State with { IsMutating = false };
+            UpdatePromptChecks.Run(app, Path.Combine(output, "update-prompts"), native);
             window.CloseForExit();
             Assert(closed, "Explicit application exit must release the window.");
             Console.WriteLine("PASS: native taskbar window, focus persistence, switch confirmation, integrated management, immediate settings and automatic five-hour usage.");
@@ -503,7 +516,7 @@ internal static class Program
     {
         var saved = client.State; window.Width = 860; window.Height = 520; window.Navigate("settings");
         Render(window, Path.Combine(output, "settings-scroll-initial.png"));
-        var scroll = (ScrollViewer)window.Content;
+        var scroll = window.PageScrollViewer;
         scroll.ScrollToVerticalOffset(Math.Min(450, scroll.ScrollableHeight)); window.UpdateLayout();
         var position = scroll.VerticalOffset;
         Assert(position > 100, "The settings regression fixture must start below the top.");
@@ -514,7 +527,7 @@ internal static class Program
             "Background account refreshes do not rebuild or scroll the settings page.");
         All<Button>(window).Single(button => Name(button) == "主题色：暮光紫").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Render(window, Path.Combine(output, "settings-scroll-after-accent.png"));
-        Assert(ReferenceEquals(window.Content, scroll) && Math.Abs(scroll.VerticalOffset - position) < 1, "Changing the accent retains the existing scroll viewer and vertical position.");
+        Assert(ReferenceEquals(window.PageScrollViewer, scroll) && Math.Abs(scroll.VerticalOffset - position) < 1, "Changing the accent retains the existing scroll viewer and vertical position.");
         // Simulate a host preference acknowledgement at the current scroll position.
         client.State = saved with { Settings = saved.Settings with { AutoResetEnabled = !saved.Settings.AutoResetEnabled } }; client.RaiseChanged();
         Render(window, Path.Combine(output, "settings-scroll-after-toggle.png"));

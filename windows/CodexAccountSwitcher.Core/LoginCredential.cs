@@ -5,7 +5,8 @@ using System.Text.Json.Nodes;
 namespace CodexAccountSwitcher.Core;
 
 // Values stay in memory/local private files; never include them in errors or UI snapshots.
-public sealed record LoginCredential(string AccountID, string Email, string AccessToken, byte[] Bytes, string? PlanType = null, string? OrganizationID = null)
+public sealed record LoginCredential(string AccountID, string Email, string AccessToken, byte[] Bytes, string? PlanType = null, string? OrganizationID = null,
+    DateTimeOffset? SubscriptionActiveUntil = null)
 {
     public static LoginCredential Read(string path)
     {
@@ -32,6 +33,7 @@ public sealed record LoginCredential(string AccountID, string Email, string Acce
             if (string.IsNullOrWhiteSpace(account) || account.Contains('*') || (claimID != null && claimID != account))
                 throw new FormatException();
             var plan = ClaimPlan(claims);
+            var subscriptionUntil = ClaimSubscriptionUntil(claims);
             var organization = ClaimOrganization(claims);
             if (access.Split('.').Length == 3) {
                 var accessClaims = Claims(access);
@@ -41,7 +43,7 @@ public sealed record LoginCredential(string AccountID, string Email, string Acce
                 organization = ClaimOrganization(accessClaims) ?? organization;
             }
             var email = claims.TryGetProperty("email", out var e) ? e.GetString() : null;
-            return new(account, email ?? account, access, bytes, plan, organization);
+            return new(account, email ?? account, access, bytes, plan, organization, subscriptionUntil);
         } catch (Exception ex) when (ex is JsonException or FormatException or InvalidOperationException or KeyNotFoundException) {
             throw new IOException("账号凭据格式不完整、被打码或身份不一致。请导出完整 JSON，或重新登录。 / Invalid credential metadata.");
         }
@@ -84,6 +86,14 @@ public sealed record LoginCredential(string AccountID, string Email, string Acce
             return String(primary, "id") ?? (records.Length > 0 ? String(records[0], "id") : null);
         }
         return null;
+    }
+
+    private static DateTimeOffset? ClaimSubscriptionUntil(JsonElement claims)
+    {
+        if (!claims.TryGetProperty("https://api.openai.com/auth", out var auth) || auth.ValueKind != JsonValueKind.Object ||
+            !auth.TryGetProperty("chatgpt_subscription_active_until", out var until)) return null;
+        if (string.Equals(ClaimPlan(claims), "free", StringComparison.OrdinalIgnoreCase)) return null;
+        return SubscriptionDate.Parse(until);
     }
 
     public static LoginCredential FromExport(JsonElement row)

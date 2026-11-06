@@ -20,6 +20,10 @@ public sealed class MainWindow : Window
     private readonly Func<DateTimeOffset> now;
     private readonly DispatcherTimer presentationTimer;
     private readonly ScrollViewer scroll = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+    private readonly Grid surface = new();
+    private readonly Border updateOverlay = new() { Background = new SolidColorBrush(Color.FromArgb(128, 0, 0, 0)), Visibility = Visibility.Collapsed };
+    private UpdateAvailableWindow? updateDialog;
+    private bool updateEvaluationQueued;
     private string page = "accounts";
     private string? renderedPage;
     private AccountSnapshot? renderedState;
@@ -33,6 +37,7 @@ public sealed class MainWindow : Window
     private bool layoutPending, closingForExit;
     public bool IsBusy => client.State.IsMutating || native.IsInstalling;
     public string CurrentPage => page;
+    public ScrollViewer PageScrollViewer => scroll;
     private double LayoutWidth => ActualWidth > 0 ? ActualWidth : Width;
     public int AccountColumnCount => accountGrid?.Columns ?? 1;
     private int LayoutKey => LayoutWidth < 720 ? 1 : 0;
@@ -74,7 +79,9 @@ public sealed class MainWindow : Window
         MinWidth = 480; MinHeight = 440; SizeToContent = SizeToContent.Manual;
         WindowStyle = WindowStyle.SingleBorderWindow; ResizeMode = ResizeMode.CanResize; ShowInTaskbar = true;
         SetResourceReference(BackgroundProperty, "Surface"); WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        scroll.SetResourceReference(BackgroundProperty, "Surface"); Content = scroll;
+        scroll.SetResourceReference(BackgroundProperty, "Surface");
+        surface.Children.Add(scroll); surface.Children.Add(updateOverlay); Content = surface;
+        AutomationProperties.SetName(updateOverlay, "更新遮罩");
         if (Application.Current is App application) application.UseThemeSettings(this.native);
         SizeChanged += (_, _) => {
             if (LayoutKey == renderedLayout || layoutPending) return;
@@ -84,6 +91,9 @@ public sealed class MainWindow : Window
         presentationTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
         presentationTimer.Tick += (_, _) => { if (IsVisible && page == "accounts" && !IsBusy) Render(); }; presentationTimer.Start();
         client.Changed += OnClientChanged; this.native.Changed += Render;
+        Activated += (_, _) => EvaluateUpdatePrompt();
+        IsVisibleChanged += (_, _) => EvaluateUpdatePrompt();
+        StateChanged += (_, _) => EvaluateUpdatePrompt();
         PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape && !IsBusy && page != "accounts") { Navigate("accounts"); e.Handled = true; } };
         Closing += (_, e) => { if (!closingForExit) { e.Cancel = true; Hide(); } };
         Closed += (_, _) => {
@@ -91,7 +101,7 @@ public sealed class MainWindow : Window
         };
         Render();
     }
-    public void CloseForExit() { closingForExit = true; Close(); }
+    public void CloseForExit() { closingForExit = true; updateDialog?.CloseForShutdown(); Close(); }
     public void OpenWindow() {
         if (State.IsAddingAccount) Navigate("accounts");
         Show(); if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
@@ -139,6 +149,7 @@ public sealed class MainWindow : Window
     private void OnClientChanged()
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(OnClientChanged)); return; }
+        updateDialog?.RefreshState();
         if (page == "settings" && renderedState is { } previous && previous.Settings == State.Settings &&
             previous.IsMutating == State.IsMutating && previous.IsAddingAccount == State.IsAddingAccount && previous.Error == State.Error) return;
         Render();
@@ -147,6 +158,8 @@ public sealed class MainWindow : Window
     private void Render()
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(Render)); return; }
+        if (closingForExit) return;
+        updateDialog?.RefreshState();
         if (target != null) {
             target = State.Accounts.FirstOrDefault(row => row.Profile.Id == target.Profile.Id);
             if (target == null) page = "accounts";
@@ -181,9 +194,9 @@ public sealed class MainWindow : Window
             } else header = Pair(title, commands);
             header.Margin = new Thickness(0, 26, 0, 24); body.Children.Add(header);
             if (State.IsAddingAccount) { var pending = Text(T("sign_in_pending_hint"), 14, muted: true); pending.TextWrapping = TextWrapping.Wrap; pending.Margin = new Thickness(0, 0, 0, 16); body.Children.Add(pending); }
-            if (native.AvailableUpdate != null || native.IsInstalling) {
+            if (native.ShouldShowUpdateBanner || native.IsInstalling) {
                 var notice = Text(native.InstallStatus ?? native.UpdateError ?? L($"发现新版本 {NativeSettings.FormatVersion(native.AvailableUpdate!.Version)}", $"Update {NativeSettings.FormatVersion(native.AvailableUpdate!.Version)} available"), 14); notice.TextWrapping = TextWrapping.Wrap;
-                var update = Button(L("更新并重启", "Update & restart"), () => _ = native.InstallUpdateAsync()); Primary(update); update.IsEnabled &= !State.IsAddingAccount;
+                var update = Button(L("更新并重启", "Update & restart"), native.RequestUpdatePrompt); Primary(update); update.IsEnabled &= !State.IsAddingAccount;
                 var banner = Box(Pair(notice, update)); banner.Padding = new Thickness(16); banner.Margin = new Thickness(0, 0, 0, 18); body.Children.Add(banner);
             }
             Accounts(body);
@@ -199,6 +212,29 @@ public sealed class MainWindow : Window
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => {
             if (generation != renderGeneration) return;
             scroll.UpdateLayout(); scroll.ScrollToVerticalOffset(offset); pendingScrollOffset = null;
+        }));
+        EvaluateUpdatePrompt();
+    }
+    public void EvaluateUpdatePrompt()
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(EvaluateUpdatePrompt)); return; }
+        if (closingForExit || Dispatcher.HasShutdownStarted || updateEvaluationQueued) return;
+        updateEvaluationQueued = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() => {
+            updateEvaluationQueued = false;
+            if (closingForExit || updateDialog != null || !IsVisible || !IsActive || !IsEnabled || WindowState == WindowState.Minimized ||
+                IsBusy || State.IsAddingAccount || native.IsChecking || (page != "accounts" && page != "settings") ||
+                OwnedWindows.Cast<Window>().Any(window => window.IsVisible)) return;
+            var prompt = native.BeginUpdatePrompt(allowAutomatic: page == "accounts");
+            if (prompt == null) return;
+            var dialog = new UpdateAvailableWindow(native, prompt, Chinese, () => !State.IsMutating && !State.IsAddingAccount) { Owner = this };
+            updateDialog = dialog; updateOverlay.Visibility = Visibility.Visible;
+            try { dialog.ShowDialog(); }
+            finally {
+                updateDialog = null; updateOverlay.Visibility = Visibility.Collapsed;
+                native.CompleteUpdatePrompt(prompt, dialog.Choice);
+                EvaluateUpdatePrompt();
+            }
         }));
     }
     private void Accounts(StackPanel body)
@@ -276,16 +312,20 @@ public sealed class MainWindow : Window
         var expiry = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
         var expiryIcon = IconText("\uE787", 16); expiryIcon.Margin = new Thickness(0, 0, 10, 0); expiry.Children.Add(expiryIcon);
         if (row.Subscription is { } subscription) {
-            var needsVerification = !subscription.IsVerified || row.SubscriptionStatus is "checking" or "stale" or "unverified";
-            var expiredSnapshot = needsVerification && subscription.ActiveUntil <= now();
+            var currentTime = now();
+            var currentLoginExpiry = row.SubscriptionStatus == "login_snapshot" && subscription.Source == "login_snapshot" &&
+                row.SubscriptionError == null && subscription.ActiveUntil > currentTime;
+            var needsVerification = !currentLoginExpiry && (!subscription.IsVerified || row.SubscriptionStatus is "checking" or "stale" or "unverified");
+            var expiredSnapshot = needsVerification && subscription.ActiveUntil <= currentTime;
             var date = Text(expiredSnapshot ? L("有效期：待核验", "Expiry: verification needed") : L("有效期：", "Expires: ") + subscription.ActiveUntil.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), 14, muted: true);
             date.ToolTip = subscription.ActiveUntil.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + "\n" +
-                (subscription.IsVerified ? L("订阅查询时间：", "Subscription checked: ") : L("登录信息时间：", "Login snapshot time: ")) +
+                (currentLoginExpiry ? L("来自当前登录信息，未进行在线核验。\n本次读取时间：", "From the current sign-in; not verified online.\nRead at: ") :
+                    subscription.IsVerified ? L("订阅查询时间：", "Subscription checked: ") : L("登录信息时间：", "Login snapshot time: ")) +
                 subscription.LastChecked.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + (row.SubscriptionError == null ? "" : "\n" + WindowsLocalization.Error(row.SubscriptionError, State.Settings.Language));
             expiry.Children.Add(date);
             if (!expiredSnapshot) {
-                var remaining = Text(" · " + (needsVerification ? L("待核验", "Unverified") : AccountVisuals.ExpiryRemaining(subscription.ActiveUntil, now(), Chinese)), 14, bold: !needsVerification);
-                remaining.SetResourceReference(TextBlock.ForegroundProperty, needsVerification ? "Muted" : AccountVisuals.ExpiryTone(subscription.ActiveUntil, now())); expiry.Children.Add(remaining);
+                var remaining = Text(" · " + (needsVerification ? L("待核验", "Unverified") : AccountVisuals.ExpiryRemaining(subscription.ActiveUntil, currentTime, Chinese)), 14, bold: !needsVerification);
+                remaining.SetResourceReference(TextBlock.ForegroundProperty, needsVerification ? "Muted" : AccountVisuals.ExpiryTone(subscription.ActiveUntil, currentTime)); expiry.Children.Add(remaining);
             }
         } else {
             var missing = Text(row.SubscriptionStatus switch {
@@ -479,10 +519,10 @@ public sealed class MainWindow : Window
         if (native.AvailableUpdate is { } update && !string.IsNullOrWhiteSpace(update.Notes)) {
             var notes = Text(update.Notes, 14, muted: true); notes.TextWrapping = TextWrapping.Wrap; notes.Margin = new Thickness(0, 0, 0, 14); updates.Children.Add(notes);
         }
-        var check = Button(T("check_for_updates"), () => _ = native.CheckUpdatesAsync()); check.IsEnabled &= !native.IsChecking && !State.IsAddingAccount;
+        var check = Button(T("check_for_updates"), () => _ = native.CheckUpdatesAsync(manual: true)); check.IsEnabled &= !native.IsChecking && !State.IsAddingAccount;
         var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right }; buttons.Children.Add(check);
         if (native.AvailableUpdate != null) {
-            var install = Button(L("更新并重启", "Update & restart"), () => _ = native.InstallUpdateAsync()); Primary(install); install.IsEnabled &= !State.IsAddingAccount;
+            var install = Button(L("更新并重启", "Update & restart"), native.RequestUpdatePrompt); Primary(install); install.IsEnabled &= !State.IsAddingAccount;
             install.Margin = new Thickness(10, 0, 0, 0); buttons.Children.Add(install);
         }
         var version = Text(T("current_version").Replace("%@", native.DisplayVersion), 14, muted: true); version.Margin = new Thickness(0, 0, 12, 0);
