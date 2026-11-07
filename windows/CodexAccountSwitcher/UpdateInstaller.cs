@@ -15,6 +15,7 @@ public sealed record UpdateJob(string Target, string Payload, string Sha256, str
 
 public static class UpdateInstaller
 {
+    public const string HelperLanguageEnvironmentVariable = "STAR_CODEX_SWITCHER_UPDATE_LANGUAGE";
     public static string CacheRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Codex Account Switcher Updates");
     public static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant(); }
 
@@ -79,8 +80,8 @@ public static class UpdateInstaller
     public static async Task StartHelperAsync(string jobPath)
     {
         var folder = Path.GetDirectoryName(jobPath)!;
-        var start = new ProcessStartInfo(Path.Combine(folder, "update-helper.exe")) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
-        start.ArgumentList.Add("--apply-update"); start.ArgumentList.Add(jobPath);
+        var language = (System.Windows.Application.Current as App)?.LanguagePreference;
+        var start = CreateHelperStartInfo(jobPath, language);
         using var helper = Process.Start(start) ?? throw new IOException("无法启动更新程序。");
         for (var attempt = 0; attempt < 100; attempt++) {
             if (File.Exists(Path.Combine(folder, "helper-ready"))) return;
@@ -89,6 +90,20 @@ public static class UpdateInstaller
         }
         try { if (!helper.HasExited) helper.Kill(); } catch { }
         throw new IOException("更新程序启动超时，当前版本继续运行。");
+    }
+
+    public static string ReadHelperLanguage() => NormalizeHelperLanguage(Environment.GetEnvironmentVariable(HelperLanguageEnvironmentVariable));
+
+    private static string NormalizeHelperLanguage(string? language) => language is "simplifiedChinese" or "english" or "system" ? language : "simplifiedChinese";
+
+    public static ProcessStartInfo CreateHelperStartInfo(string jobPath, string? language)
+    {
+        var folder = Path.GetDirectoryName(jobPath)!;
+        var start = new ProcessStartInfo(Path.Combine(folder, "update-helper.exe")) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
+        start.ArgumentList.Add("--apply-update"); start.ArgumentList.Add(jobPath);
+        // Resolve the selected UI language before the helper reads any update files.
+        start.Environment[HelperLanguageEnvironmentVariable] = NormalizeHelperLanguage(language);
+        return start;
     }
 
     public static async Task ApplyTransactionAsync(UpdateJob job, Func<string, Task> launchAndVerify)

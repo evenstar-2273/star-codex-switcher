@@ -31,6 +31,7 @@ internal static class LanguageChecks
             CheckStorageMessages();
             CheckCleanupMessages();
             CheckUpdateErrors();
+            CheckUpdateHelperLanguage();
             CheckCase("zh-CN", "system", true, "system-language-zh.png");
             CheckCase("zh-CN", "english", false, null);
             CheckCase("en-US", "simplifiedChinese", true, null);
@@ -46,7 +47,7 @@ internal static class LanguageChecks
             CheckImportCase("en-US", "simplifiedChinese", true, StorageError, "import-storage-4393-error-zh.png");
             CheckImportCase("en-US", "simplifiedChinese", true, "The account storage directory could not be resolved (Windows error 1921).", "import-storage-target-error-zh.png");
             CheckImportCase("zh-CN", "english", false, StorageLinkError, null);
-            Console.WriteLine("PASS: Windows UI language, account/storage/cancellation/cleanup messages, known bilingual failures, private technical details, failed import recovery and unchanged preferences verified.");
+            Console.WriteLine("PASS: Windows UI language, account/storage/cancellation/cleanup messages, update-helper language handoff, known bilingual failures, private technical details, failed import recovery and unchanged preferences verified.");
         } finally { CultureInfo.CurrentUICulture = original; }
 
         void CheckCase(string culture, string language, bool chinese, string? screenshot, string error = IdentityError, string? expectedFragment = null)
@@ -246,6 +247,45 @@ internal static class LanguageChecks
                     "Both update surfaces retain only sanitized technical details.");
             }
         } finally { dialog.CloseForShutdown(); window.CloseForExit(); }
+    }
+
+    private static void CheckUpdateHelperLanguage()
+    {
+        var originalCulture = CultureInfo.CurrentUICulture;
+        var variable = UpdateInstaller.HelperLanguageEnvironmentVariable;
+        var originalEnvironment = Environment.GetEnvironmentVariable(variable);
+        const string unknownFailure = "Fixture helper update failed before reading its job file.";
+        var jobPath = Path.Combine(Path.GetTempPath(), "switcher-language-fixture", "job.json");
+        try {
+            CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo("en-US");
+            var client = new LanguageClient("simplifiedChinese");
+            var start = UpdateInstaller.CreateHelperStartInfo(jobPath, client.State.Settings.Language);
+            Require(start.ArgumentList.SequenceEqual(new[] { "--apply-update", jobPath }) && !start.UseShellExecute && start.CreateNoWindow,
+                "Passing the chosen language preserves the hidden update-helper command.");
+            Require(start.Environment[variable] == "simplifiedChinese", "The updater receives the selected Chinese preference even on English Windows.");
+            Environment.SetEnvironmentVariable(variable, start.Environment[variable]);
+            var message = WindowsLocalization.Error(unknownFailure, UpdateInstaller.ReadHelperLanguage());
+            Require(message.Contains("操作未完成") && !message.Contains("Fixture"), "Helper errors before job parsing have a Chinese primary message with a Chinese preference.");
+            Require(WindowsLocalization.Error(PermissionError, UpdateInstaller.ReadHelperLanguage()).Contains("文件是否被占用及目录权限"),
+                "Helper file-access failures retain the Chinese corrective explanation.");
+            var details = WindowsLocalization.TechnicalDetails("access_token=fixture-secret " + unknownFailure, UpdateInstaller.ReadHelperLanguage());
+            Require(details!.Contains("技术详情") && details.Contains(unknownFailure) && !details.Contains("fixture-secret"),
+                "Helper diagnostics retain the original cause separately and hide credentials.");
+
+            foreach (var preference in new[] { "english", "system" }) {
+                var english = UpdateInstaller.CreateHelperStartInfo(jobPath, preference);
+                Environment.SetEnvironmentVariable(variable, english.Environment[variable]);
+                Require(WindowsLocalization.Error(unknownFailure, UpdateInstaller.ReadHelperLanguage()) == unknownFailure,
+                    "Explicit English and follow-system preferences still use English on English Windows.");
+            }
+            foreach (var invalid in new string?[] { null, "invalid-language" }) {
+                Environment.SetEnvironmentVariable(variable, invalid);
+                Require(UpdateInstaller.ReadHelperLanguage() == "simplifiedChinese", "Missing or invalid helper language safely defaults to Chinese.");
+            }
+        } finally {
+            Environment.SetEnvironmentVariable(variable, originalEnvironment);
+            CultureInfo.CurrentUICulture = originalCulture;
+        }
     }
 
     private static void Require(bool valid, string message) { if (!valid) throw new Exception(message); }

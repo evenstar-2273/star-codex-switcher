@@ -47,6 +47,7 @@ public partial class App : Application
     public bool UsesDarkPalette { get; private set; }
     public string AccentPreference { get; private set; } = "purple";
     public event Action? PaletteChanged;
+    public string LanguagePreference => client?.State.Settings.Language ?? "simplifiedChinese";
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -54,7 +55,7 @@ public partial class App : Application
         if (!startRuntime) return;
         if (e.Args.Length == 2 && e.Args[0] == "--apply-update") {
             try { await UpdateInstaller.RunHelperAsync(e.Args[1]); Shutdown(); }
-            catch (Exception ex) { ShowStartupError(ex.Message, "system"); Shutdown(1); }
+            catch (Exception ex) { ShowStartupError(ex.Message, UpdateInstaller.ReadHelperLanguage()); Shutdown(1); }
             return;
         }
         if (e.Args.Length == 3 && e.Args[0] == "--cleanup-install-shortcuts") {
