@@ -2,7 +2,7 @@
 
 面向 Windows 的 Codex 账号管理与切换工具。支持账号额度查看、JSON 导入和安装版更新，只维护 Codex 场景。
 
-[下载安装包](https://github.com/evenstar-2273/star-codex-switcher/releases/latest) · [问题反馈](https://github.com/evenstar-2273/star-codex-switcher/issues) · [更新记录](CHANGELOG.md) · [构建与发布](docs/windows-build-release.md)
+[GitHub 下载最新版](https://github.com/evenstar-2273/star-codex-switcher/releases/latest/download/Star-Codex-Switcher-Setup-x64.exe) · [服务器下载最新版](https://starsmsai.top/codex-switcher/Star-Codex-Switcher-Setup-x64.exe) · [问题反馈](https://github.com/evenstar-2273/star-codex-switcher/issues) · [更新记录](CHANGELOG.md) · [构建与发布](docs/windows-build-release.md)
 
 应用提供原生 Windows 界面，账号数据保存在本机，切换前检查目标凭据并要求二次确认。
 
@@ -27,7 +27,7 @@
 ## 安装与使用
 
 1. 安装并运行过 Codex Desktop，确认本机能够连接其服务。
-2. 在 [Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 下载对应版本的安装包，例如 `Star-Codex-Switcher-1.0.7-Setup-x64.exe`，双击安装。它是安装程序，不能把它直接覆盖到旧版程序上。
+2. 使用上方任一固定直链下载 `Star-Codex-Switcher-Setup-x64.exe`，双击安装；这两个地址始终提供最新正式版。需要指定版本时，可到 [Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 下载带版本号的安装包，例如 `Star-Codex-Switcher-1.0.7-Setup-x64.exe`。它们都是安装程序，不能直接覆盖到旧版程序上。
 3. 打开工具，保存当前账号，或点击“添加账号”选择浏览器授权 / JSON 导入。取消授权后，工具会结束本次登录并恢复操作；无需退出当前账号。切换前先完成或停止 Codex Desktop 内正在运行的任务。
 4. 点击账号的“切换”，核对二次确认提示后继续。切换流程可能关闭并重启 Codex Desktop。
 
@@ -67,9 +67,9 @@
 
 在设置中手动“检查更新”，仍可查看并安装已经跳过的版本。
 
-更新源固定为本仓库，不在设置页提供自定义服务器地址。软件内新版本提示、[更新记录](CHANGELOG.md) 和 Release 说明对应同一版本。从 1.0.4 起，发布时只上传安装包、校验文件与更新清单三项资产，源码使用 GitHub 自带的 Source code 下载，详见 [发布文档](docs/windows-build-release.md)。
+更新源固定为本仓库，不在设置页提供自定义服务器地址。软件内新版本提示、[更新记录](CHANGELOG.md) 和 Release 说明对应同一版本。从 1.0.7 起，每次发布提供带版本号的安装包、其校验文件、更新清单和固定名安装包四项资产；固定名包与该版本包内容完全一致。软件自动更新仍使用清单中绑定具体版本的下载地址；源码使用 GitHub 自带的 Source code，详见 [发布文档](docs/windows-build-release.md)。
 
-GitHub 保留历史 Release、下载资产和 tag；Latest 和自动更新指向最新验证通过的版本。每次新版公开下载、校验文件和更新清单验证成功后，本地交付及测试打包目录及自有服务器镜像只保留最新安装包和对应校验文件。源码、源码归档、Git 历史及账号数据保留；发布或验证失败时不清理旧包。
+GitHub 保留历史 Release、下载资产和 tag；Latest、两个固定下载直链和自动更新指向最新验证通过的版本。每次新版版本包、固定直链、校验文件和更新清单验证成功后，本地交付及测试打包目录和服务器镜像只保留最新物理安装包、对应校验文件及固定名下载入口。源码、源码归档、Git 历史及账号数据保留；发布或验证失败时不清理旧包。
 
 ## 开发文档
 
