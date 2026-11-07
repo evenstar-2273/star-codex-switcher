@@ -54,7 +54,7 @@ public sealed class MainWindow : Window
             "accounts" => L("账号", "Accounts"), "settings" => L("设置", "Settings"), "back" => L("返回", "Back"),
             "cancel" => L("取消", "Cancel"), "remove" => L("删除", "Delete"), "switch" => L("切换账号", "Switch account"),
             "add_account" => L("添加账号", "Add account"), "cancel_add_account" => L("取消添加", "Cancel sign-in"),
-            "register_current_account" => L("保存当前登录", "Save current login"),
+            "register_current_account" => L("获取本地账号", "Get local account"),
             "unknown" => L("未知", "Unknown"), "usage_unavailable" => L("暂时无法获取额度", "Quota unavailable"),
             "no_accounts" => L("还没有账号，可先导入或添加账号。", "No accounts yet. Import or add an account."),
             "active_unconfirmed" => L("当前登录尚未确认，请检查账号状态。", "Current login is not confirmed."),
@@ -194,12 +194,19 @@ public sealed class MainWindow : Window
     }
     private void StartConfirmation(AccountRow row, string destination) {
         if (IsBusy || State.IsAddingAccount) return;
+        if (destination == "switch" && QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(account => account.Profile.Id == row.Profile.Id)?.UsageError)) return;
         confirmationReturnPage = "accounts"; target = row; page = destination; Render();
     }
     private void OnClientChanged()
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(OnClientChanged)); return; }
         updateDialog?.RefreshState();
+        var latest = State;
+        if (renderedState is { } displayed && displayed with { Accounts = latest.Accounts, Strings = latest.Strings, UsageRefreshRevision = latest.UsageRefreshRevision } == latest &&
+            displayed.Accounts.SequenceEqual(latest.Accounts) && displayed.Strings.Count == latest.Strings.Count && displayed.Strings.All(item => latest.Strings.TryGetValue(item.Key, out var translation) && translation == item.Value)) {
+            // Revision-only background notifications do not replace focused controls or flash the list.
+            renderedState = latest; return;
+        }
         if (page == "settings" && renderedState is { } previous &&
             previous.Settings with { QuotaRefreshIntervalMinutes = State.Settings.QuotaRefreshIntervalMinutes } == State.Settings &&
             previous.IsMutating == State.IsMutating && previous.IsAddingAccount == State.IsAddingAccount && previous.Error == State.Error) {
@@ -306,15 +313,19 @@ public sealed class MainWindow : Window
         if (State.Accounts.Length == 0) {
             var empty = Text(T("no_accounts"), 17, muted: true); empty.Margin = new Thickness(24, 54, 24, 54); empty.TextWrapping = TextWrapping.Wrap; body.Children.Add(Box(empty));
         } else body.Children.Add(list);
-        var save = Button(T("register_current_account"), () => _ = Run("register"), "\uE74E"); save.IsEnabled &= !State.IsAddingAccount;
-        save.Margin = new Thickness(0, 18, 0, 0); save.HorizontalAlignment = HorizontalAlignment.Left;
-        save.ToolTip = L("将 Codex 当前已登录的账号保存到列表", "Save the account currently signed in to Codex"); body.Children.Add(save);
     }
-    private void OpenAddAccount()
+    private void OpenAddAccount() => OpenAddAccount(false);
+    private void OpenAddAccount(bool recovery)
     {
         if (IsBusy) return;
         if (State.IsAddingAccount) { _ = Run("cancelAdd"); return; }
-        var choice = new AddAccountWindow(Chinese, client is IAccountImporter) { Owner = this };
+        var choice = new AddAccountWindow(Chinese, client is IAccountImporter, async () => {
+            await client.CommandAsync("dismissError");
+            await client.CommandAsync("register");
+            if (State.Error is { } failure) throw new System.IO.IOException(failure);
+            if (!State.ActiveIdentityConfirmed || State.ActiveAccountID == null)
+                throw new System.IO.IOException(L("未读取到本地登录账号，请先在 Codex 中完成登录后重试。", "No local signed-in account was found. Sign in to Codex and retry."));
+        }, recovery) { Owner = this };
         if (choice.ShowDialog() != true || IsBusy || State.IsAddingAccount) return;
         if (choice.SelectedMethod == AddAccountMethod.Browser) _ = Run("add");
         else if (choice.SelectedMethod == AddAccountMethod.Json) OpenJsonImport();
@@ -364,12 +375,28 @@ public sealed class MainWindow : Window
             missing.ToolTip = WindowsLocalization.Error(row.UsageError, State.Settings.Language); missing.TextWrapping = TextWrapping.Wrap; quotas.Children.Add(missing);
         }
         if (!string.IsNullOrWhiteSpace(row.UsageError)) {
-            var failure = Text(row.Usage != null ? L("刷新失败，显示上次额度", "Refresh failed; showing previous quota") : L("刷新失败", "Refresh failed"), 13, bold: true);
-            failure.SetResourceReference(TextBlock.ForegroundProperty, "Warning"); failure.TextWrapping = TextWrapping.Wrap;
-            failure.TextTrimming = TextTrimming.None; failure.Margin = new Thickness(0, 4, 0, 0); quotas.Children.Add(failure);
-            var reason = Text(WindowsLocalization.Error(row.UsageError, State.Settings.Language), 13, muted: true);
+            var expiredLogin = QuotaReadException.IsAuthenticationFailure(row.UsageError);
+            var tone = expiredLogin ? "Danger" : "Warning";
+            var warning = new StackPanel { Margin = new Thickness(12) };
+            var heading = new StackPanel { Orientation = Orientation.Horizontal };
+            var symbol = IconText(expiredLogin ? "\uE72E" : "\uE7BA", 18); symbol.Margin = new Thickness(0, 0, 8, 0); symbol.SetResourceReference(TextBlock.ForegroundProperty, tone); heading.Children.Add(symbol);
+            var failure = Text(expiredLogin ? L("登录已失效", "Sign-in expired") : L("刷新失败", "Refresh failed"), 16, bold: true);
+            failure.SetResourceReference(TextBlock.ForegroundProperty, tone); failure.TextWrapping = TextWrapping.Wrap;
+            failure.TextTrimming = TextTrimming.None; heading.Children.Add(failure); warning.Children.Add(heading);
+            var reason = Text(WindowsLocalization.Error(row.UsageError, State.Settings.Language), 14);
             reason.TextWrapping = TextWrapping.Wrap; reason.TextTrimming = TextTrimming.None; reason.Margin = new Thickness(0, 4, 0, 0);
-            reason.ToolTip = reason.Text; AutomationProperties.SetName(reason, L("额度刷新失败原因", "Quota refresh error")); quotas.Children.Add(reason);
+            reason.ToolTip = reason.Text; AutomationProperties.SetName(reason, L("额度刷新失败原因", "Quota refresh error")); warning.Children.Add(reason);
+            if (row.Usage != null) {
+                var cached = Text(L("显示上次额度，仅供参考", "Showing the last known quota for reference"), 13, muted: true);
+                cached.TextWrapping = TextWrapping.Wrap; cached.Margin = new Thickness(0, 6, 0, 0); warning.Children.Add(cached);
+            }
+            if (expiredLogin) {
+                var authorize = Button(L("恢复登录", "Restore sign-in"), () => OpenAddAccount(true), "\uE72E"); authorize.Margin = new Thickness(0, 10, 0, 0); authorize.HorizontalAlignment = HorizontalAlignment.Left;
+                authorize.IsEnabled &= !State.IsAddingAccount; warning.Children.Add(authorize);
+            }
+            var alert = Box(warning, expiredLogin ? "DangerSurface" : "WarningSurface", 9);
+            alert.SetResourceReference(Border.BorderBrushProperty, tone); alert.Margin = new Thickness(0, 8, 0, 4);
+            AutomationProperties.SetName(alert, expiredLogin ? L("登录失效提示", "Expired sign-in alert") : L("刷新失败提示", "Refresh failure alert")); quotas.Children.Add(alert);
         }
         Grid.SetRow(quotas, 1); card.Children.Add(quotas);
         var metadata = new StackPanel(); metadata.Children.Add(Rule());
@@ -407,9 +434,10 @@ public sealed class MainWindow : Window
         var utilityActions = new StackPanel { Orientation = Orientation.Horizontal };
         actions.Children.Add(accountActions); actions.Children.Add(utilityActions);
         var change = Button(active ? L("使用中", "In use") : L("切换", "Switch"), () => { if (!active) StartConfirmation(row, "switch"); }, active ? "\uE73E" : "\uE8AB");
-        change.MinWidth = 86; change.IsEnabled &= !active && !State.IsAddingAccount; if (!active) Primary(change);
+        var authenticationFailed = QuotaReadException.IsAuthenticationFailure(row.UsageError);
+        change.MinWidth = 86; change.IsEnabled &= !active && !State.IsAddingAccount && !authenticationFailed; if (!active) Primary(change);
         AutomationProperties.SetName(change, row.Profile.Email ?? row.Profile.DisplayName);
-        change.ToolTip = active ? L("当前使用的账号", "Current account") : L("确认后切换此账号", "Confirm before switching to this account"); accountActions.Children.Add(change);
+        change.ToolTip = active ? L("当前使用的账号", "Current account") : authenticationFailed ? L("登录已失效，请先恢复登录后再切换", "Sign-in expired; restore sign-in before switching") : L("确认后切换此账号", "Confirm before switching to this account"); accountActions.Children.Add(change);
         var count = row.Usage?.ResetCreditsRemaining?.ToString(CultureInfo.CurrentCulture) ?? T("unknown");
         var resetting = resetRotation?.Includes(row.Profile.Id) == true;
         var reset = Button(resetting ? L("重置中…", "Resetting…") : L("重置 " + count + " 次", "Reset " + count), () => { if (row.Usage?.ResetCreditsRemaining > 0) StartConfirmation(row, "resetQuota"); }, "\uE777");
@@ -419,8 +447,8 @@ public sealed class MainWindow : Window
         AutomationProperties.SetName(reset, L("重置额度", "Reset quota")); accountActions.Children.Add(reset);
         var refresh = RefreshButton("", row.Profile.Id);
         refresh.ToolTip = L("刷新此账号", "Refresh this account"); AutomationProperties.SetName(refresh, L("刷新此账号", "Refresh this account")); utilityActions.Children.Add(refresh);
-        var remove = Button("", () => { if (!active) StartConfirmation(row, "remove"); }, "\uE74D"); remove.Margin = new Thickness(8, 0, 0, 0);
-        remove.IsEnabled &= !active && !State.IsAddingAccount; remove.ToolTip = active ? L("不能删除当前使用的账号", "Cannot delete the current account") : L("删除此账号", "Delete this account");
+        var remove = Button("", () => StartConfirmation(row, "remove"), "\uE74D"); remove.Margin = new Thickness(8, 0, 0, 0);
+        remove.IsEnabled &= !State.IsAddingAccount; remove.ToolTip = L("删除此账号", "Delete this account");
         AutomationProperties.SetName(remove, T("remove")); utilityActions.Children.Add(remove);
         Grid.SetRow(actions, 3); card.Children.Add(actions);
         var border = Box(card, active ? "Selected" : "ListSurface", 12); border.Margin = new Thickness(8); border.MinHeight = 350;
@@ -492,7 +520,7 @@ public sealed class MainWindow : Window
         var copy = page switch {
             "switch" => L("先联网验证目标账号；凭据失效或网络异常时保留当前登录。验证通过后，将强制结束并重新打开 Codex。未保存的状态可能丢失，请先完成当前任务。", "The target login is checked before Codex closes. Invalid credentials or network errors preserve the current login. Codex then closes forcibly and restarts. Finish active tasks first; unsaved work may be lost."),
             "resetQuota" => L("本次操作将消耗 1 张重置卡。", "This uses one reset credit."),
-            _ => L("仅从此工具删除保存的账号，不会删除 ChatGPT 账号。此操作无法撤销。", "Remove the saved login from this tool. This does not delete the ChatGPT account. This cannot be undone.")
+            _ => L("仅从此工具删除保存的账号，不会退出 Codex 当前登录，也不会删除 ChatGPT 账号。以后可重新授权、导入或获取本地账号。此操作无法撤销。", "Remove only the saved login from this tool. Codex stays signed in and your ChatGPT account is not deleted. You can authorize, import, or get the local account again. This cannot be undone.")
         };
         var text = Text(copy, 15, bold: page == "resetQuota"); text.TextWrapping = TextWrapping.Wrap;
         var note = new StackPanel { Margin = new Thickness(16) }; note.Children.Add(text);
@@ -506,12 +534,14 @@ public sealed class MainWindow : Window
         var command = page; var id = target.Profile.Id;
         var resetting = page == "resetQuota" && resetRotation?.Includes(id) == true;
         var confirm = Button(page == "resetQuota" ? resetting ? L("重置中…", "Resetting…") : L("确认重置", "Confirm reset") : T(command), () => {
-            if (IsBusy || State.IsAddingAccount || command == "resetQuota" && State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage?.ResetCreditsRemaining is not > 0) return;
+            if (IsBusy || State.IsAddingAccount || command == "resetQuota" && State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage?.ResetCreditsRemaining is not > 0 ||
+                command == "switch" && QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.UsageError)) return;
             if (command == "resetQuota") _ = Run(command, id);
             else { Navigate(confirmationReturnPage); _ = Run(command, id); }
         }, resetting ? "\uE777" : null);
         if (resetting) AttachResetRotation(confirm);
-        confirm.IsEnabled &= !State.IsAddingAccount && (page != "resetQuota" || target.Usage?.ResetCreditsRemaining > 0);
+        confirm.IsEnabled &= !State.IsAddingAccount && (page != "resetQuota" || target.Usage?.ResetCreditsRemaining > 0) &&
+            (page != "switch" || !QuotaReadException.IsAuthenticationFailure(target.UsageError));
         if (page == "resetQuota") AutomationProperties.SetName(confirm, resetting ? L("重置中…", "Resetting…") : L("确认重置 · 消耗 1 张", "Confirm reset · use one credit"));
         confirm.Margin = new Thickness(10, 0, 0, 0); Primary(confirm); buttons.Children.Add(confirm); content.Children.Add(buttons);
         var box = Box(content); box.MaxWidth = 720; box.HorizontalAlignment = HorizontalAlignment.Stretch; body.Children.Add(box);

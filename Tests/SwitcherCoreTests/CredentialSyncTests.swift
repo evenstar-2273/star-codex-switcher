@@ -202,7 +202,7 @@ struct CredentialSyncTests {
         #expect(model.visibleError == nil)
     }
 
-    @Test @MainActor func removalCannotDeleteAnAccountThatBecameActiveExternally() async throws {
+    @Test @MainActor func removalOfAnExternallyActivatedAccountPreservesItsLiveLogin() async throws {
         let fixture = try CredentialFixture()
         defer { fixture.clean() }
         let first = fixture.profile("personal")
@@ -216,12 +216,18 @@ struct CredentialSyncTests {
                                       switchService: CredentialSwitch(store: fixture.store))
         await model.start()
         try fixture.writeLive("workspace", token: "fresh")
+        let liveCredential = try Data(contentsOf: fixture.auth)
+        let firstHome = await fixture.store.profileHome(id: first.id)
+        let otherCredential = try Data(contentsOf: firstHome.appending(path: "auth.json"))
         await model.removeAccount(id: second.id)
         await model.waitForWeeklyUsageRefresh()
-        #expect(model.activeAccountID == second.id)
-        #expect(model.accounts.count == 2)
-        #expect(model.visibleError?.message == AccountStoreError.cannotRemoveActiveAccount.localizedDescription)
-        #expect(try Data(contentsOf: home.appending(path: "auth.json")) == Data(contentsOf: fixture.auth))
+        #expect(model.activeAccountID == nil)
+        #expect(model.accounts == [first])
+        #expect(model.activeIdentityConfirmed)
+        #expect(model.visibleError == nil)
+        #expect(!FileManager.default.fileExists(atPath: home.path))
+        #expect(try Data(contentsOf: fixture.auth) == liveCredential)
+        #expect(try Data(contentsOf: firstHome.appending(path: "auth.json")) == otherCredential)
     }
 
     @Test @MainActor func switchingDrainsOldRefreshBeforeChangingCredentials() async throws {

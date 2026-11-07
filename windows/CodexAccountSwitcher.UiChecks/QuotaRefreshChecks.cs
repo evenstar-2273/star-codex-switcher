@@ -155,12 +155,12 @@ internal static class QuotaRefreshChecks
         window.Width = 860; window.Height = 720; window.Navigate("accounts"); Pump();
         var cards = All<AdaptiveCardGrid>(window).Single().Children.Cast<FrameworkElement>().ToArray();
         Check(All<TextBlock>(cards[0]).Any(text => text.Text == "83%") && All<TextBlock>(cards[0]).Any(text => text.Text == "71%"), "Failed refresh keeps the last known percentages.");
-        var stale = All<TextBlock>(cards[0]).Single(text => text.Text == "刷新失败，显示上次额度");
+        var stale = All<TextBlock>(cards[0]).Single(text => text.Text == "刷新失败");
         Check(Equals(stale.Foreground, app.Resources["Warning"]), "Cached quota failures use a visible semantic warning heading.");
         Check(!All<TextBlock>(cards[1]).Any(text => text.Text is "0%" or "额度读取中…"), "A failed first read stays unknown and does not masquerade as zero quota or an ongoing load.");
         foreach (var card in cards) {
             var detail = All<TextBlock>(card).Single(text => AutomationProperties.GetName(text) == "额度刷新失败原因");
-            Check(detail.Text == reason && detail.IsVisible && detail.FontSize == 13 && detail.TextWrapping == TextWrapping.Wrap && detail.TextTrimming == TextTrimming.None, "The safe network reason is directly visible and wraps without requiring hover.");
+            Check(detail.Text == reason && detail.IsVisible && detail.FontSize >= 14 && detail.TextWrapping == TextWrapping.Wrap && detail.TextTrimming == TextTrimming.None, "The safe network reason is directly visible in readable text and wraps without requiring hover.");
             var position = detail.TranslatePoint(new Point(), card);
             Check(position.X >= 0 && position.X + detail.ActualWidth <= card.ActualWidth && position.Y + detail.ActualHeight <= card.ActualHeight, "Wrapped errors remain inside an automatically sized narrow card.");
         }

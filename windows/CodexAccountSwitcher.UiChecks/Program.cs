@@ -17,6 +17,13 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length >= 1 && args[0] == "--test-account-actions") {
+            try {
+                var app = new App(false); app.InitializeComponent(); app.ApplyPalette(false);
+                RefreshResetChecks.Run(app, Path.GetFullPath(args.ElementAtOrDefault(1) ?? "windows/artifacts/account-actions"),
+                    new NativeSettings(@"Software\StarCodexSwitcher.UiChecks\AccountActions-Restore")); return 0;
+            } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
         if (args.Length >= 1 && args[0] == "--test-language") {
             try {
                 var target = Path.GetFullPath(args.ElementAtOrDefault(1) ?? "windows/artifacts/language");
@@ -494,7 +501,7 @@ internal static class Program
             Schedule(() => {
                 var dialog = app.Windows.OfType<AddAccountWindow>().Single(); dialog.UpdateLayout();
                 Assert(client.Commands.Count == before, "Opening the account method chooser cannot begin authorization or import.");
-                Assert(All<Button>(dialog).Count(button => Name(button) is "浏览器授权" or "JSON 导入") == 2, "The add dialog presents both supported methods.");
+                Assert(All<Button>(dialog).Count(button => Name(button) is "浏览器授权" or "JSON 导入" or "获取本地账号") == 3, "The add dialog presents browser, JSON and local-account methods.");
                 choose(dialog);
             });
             All<Button>(window).Single(button => Name(button) == "添加账号").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
@@ -522,6 +529,10 @@ internal static class Program
             All<Button>(dialog).Single(button => Name(button) == "JSON 导入").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         });
         Assert(client.Commands.Count == before, "Closing JSON without submission is inert.");
+        Assert(!All<Button>(window).Any(button => Name(button) is "保存当前登录" or "获取本地账号"), "Local retrieval belongs inside the add-account chooser rather than the account list footer.");
+        Open(dialog => All<Button>(dialog).Single(button => Name(button) == "获取本地账号").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+        Assert(client.Commands.Count == before + 2 && client.Commands.Last() == "register:" && !app.Windows.OfType<AddAccountWindow>().Any(), "Getting the local account invokes the existing registration command and closes after a confirmed local identity.");
+        before = client.Commands.Count;
         Open(dialog => All<Button>(dialog).Single(button => Name(button) == "浏览器授权").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
         Assert(client.Commands.Count == before + 1 && client.Commands.Last() == "add:", "Only selecting browser authorization issues one add command.");
         client.State = saved with { IsAddingAccount = true }; client.RaiseChanged(); window.UpdateLayout();

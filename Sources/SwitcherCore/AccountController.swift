@@ -300,7 +300,7 @@ open class AccountController {
         defer { isMutating = false; refreshWeeklyUsage() }
         do {
             guard await store.activeCredentialExists() else { throw AccountStoreError.activeCredentialMissing }
-            try await syncActiveIdentity()
+            try await syncActiveIdentity(includeRemoved: true)
             await refreshSubscriptionSnapshots()
             visibleError = nil
         } catch { showError(error) }
@@ -316,6 +316,7 @@ open class AccountController {
             try await store.removeAccount(id: id)
             apply(try await store.loadRegistry())
             usageStates[id] = nil
+            visibleError = nil
         } catch {
             showError(error)
         }
@@ -516,10 +517,11 @@ open class AccountController {
         }
     }
 
-    private func syncActiveIdentity() async throws {
+    private func syncActiveIdentity(includeRemoved: Bool = false) async throws {
         do {
-            apply(try await store.syncActiveCredential())
-            activeIdentityConfirmed = activeAccountID != nil || accounts.isEmpty
+            apply(try await store.syncActiveCredential(includeRemoved: includeRemoved))
+            let deliberatelyRemoved = await store.activeCredentialWasRemoved
+            activeIdentityConfirmed = activeAccountID != nil || accounts.isEmpty || deliberatelyRemoved
         } catch {
             activeAccountID = nil
             activeIdentityConfirmed = false

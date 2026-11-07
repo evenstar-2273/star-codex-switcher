@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -6,16 +8,16 @@ using System.Windows.Media;
 
 namespace CodexAccountSwitcher;
 
-public enum AddAccountMethod { Browser, Json }
+public enum AddAccountMethod { Browser, Json, Local }
 
 public sealed class AddAccountWindow : Window
 {
     public AddAccountMethod? SelectedMethod { get; private set; }
 
-    public AddAccountWindow(bool chinese = true, bool canImport = true)
+    public AddAccountWindow(bool chinese = true, bool canImport = true, Func<Task>? readLocal = null, bool recovery = false)
     {
         string L(string zh, string en) => chinese ? zh : en;
-        Title = L("添加账号", "Add account") + " · " + App.DisplayName;
+        Title = (recovery ? L("恢复登录", "Restore sign-in") : L("添加账号", "Add account")) + " · " + App.DisplayName;
         Icon = System.Windows.Media.Imaging.BitmapFrame.Create(App.IconUri);
         Width = Math.Min(560, SystemParameters.WorkArea.Width - 24);
         MaxHeight = Math.Max(320, SystemParameters.WorkArea.Height - 24);
@@ -23,9 +25,13 @@ public sealed class AddAccountWindow : Window
         WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
         SetResourceReference(BackgroundProperty, "Surface"); SetResourceReference(ForegroundProperty, "Ink");
         var panel = new StackPanel { Margin = new Thickness(26) };
-        panel.Children.Add(new TextBlock { Text = L("添加账号", "Add account"), FontSize = 26, FontWeight = FontWeights.SemiBold });
-        var intro = new TextBlock { Text = L("选择一种添加方式", "Choose how to add your account"), FontSize = 15, Margin = new Thickness(0, 8, 0, 22) };
+        panel.Children.Add(new TextBlock { Text = recovery ? L("恢复登录", "Restore sign-in") : L("添加账号", "Add account"), FontSize = 26, FontWeight = FontWeights.SemiBold });
+        var intro = new TextBlock { Text = recovery
+            ? L("当前使用中的账号：请先在 Codex 中重新登录，再获取本地账号。其他已保存账号也可导入有效的账号 JSON 更新登录。", "For the current account, sign in to Codex again, then get the local account. Other saved accounts can also be updated by importing valid account JSON.")
+            : L("选择一种添加方式", "Choose how to add your account"), TextWrapping = TextWrapping.Wrap, FontSize = 15, Margin = new Thickness(0, 8, 0, 22) };
         intro.SetResourceReference(TextBlock.ForegroundProperty, "Muted"); panel.Children.Add(intro);
+        var methods = new List<Button>();
+        var reading = false;
         Button Method(AddAccountMethod method, string name, string description, string glyph)
         {
             var content = new Grid(); content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
@@ -44,17 +50,43 @@ public sealed class AddAccountWindow : Window
             button.SizeChanged += (_, _) => content.Width = Math.Max(0, button.ActualWidth - button.Padding.Left - button.Padding.Right - 2);
             button.SetResourceReference(BackgroundProperty, "ListSurface"); AutomationProperties.SetName(button, name);
             AutomationProperties.SetHelpText(button, description);
-            button.Click += (_, _) => { SelectedMethod = method; DialogResult = true; };
+            if (method != AddAccountMethod.Local) button.Click += (_, _) => { if (!reading) { SelectedMethod = method; DialogResult = true; } };
+            methods.Add(button);
             return button;
         }
-        panel.Children.Add(Method(AddAccountMethod.Browser, L("浏览器授权", "Browser authorization"),
+        if (!recovery) panel.Children.Add(Method(AddAccountMethod.Browser, L("浏览器授权", "Browser authorization"),
             L("打开浏览器，使用 ChatGPT 账号登录并授权。", "Sign in with your ChatGPT account in the browser."), "\uE774"));
         var import = Method(AddAccountMethod.Json, L("JSON 导入", "Import JSON"),
             L("粘贴账号 JSON 或 auth.json，也可选择文件导入。", "Paste account JSON or auth.json, or choose a file."), "\uE896");
         import.IsEnabled = canImport; panel.Children.Add(import);
+        var local = Method(AddAccountMethod.Local, L("获取本地账号", "Get local account"),
+            L("读取本机 Codex 已登录的账号，添加到账号列表。", "Read the account signed in to Codex on this computer and save it to the list."), "\uE7F8");
+        local.IsEnabled = readLocal != null; panel.Children.Add(local);
+        var status = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 14 };
+        status.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
+        AutomationProperties.SetName(status, L("本地账号读取状态", "Local account status")); panel.Children.Add(status);
         var cancel = new Button { Content = L("取消", "Cancel"), Style = (Style)FindResource("ActionButton"), MinWidth = 88,
             IsCancel = true, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
         AutomationProperties.SetName(cancel, L("取消", "Cancel")); cancel.Click += (_, _) => Close(); panel.Children.Add(cancel);
+        local.Click += async (_, _) => {
+            if (reading || readLocal == null) return;
+            reading = true;
+            foreach (var method in methods) method.IsEnabled = false;
+            cancel.IsEnabled = false;
+            status.SetResourceReference(TextBlock.ForegroundProperty, "Muted"); status.Text = L("正在读取本地账号…", "Reading local account…");
+            var succeeded = false;
+            try { await readLocal(); SelectedMethod = AddAccountMethod.Local; succeeded = true; }
+            catch (Exception ex) {
+                status.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
+                status.Text = WindowsLocalization.Error(ex.Message, chinese ? "simplifiedChinese" : "english");
+            } finally {
+                reading = false;
+                foreach (var method in methods) method.IsEnabled = true;
+                import.IsEnabled = canImport; cancel.IsEnabled = true;
+            }
+            if (succeeded) Close();
+        };
+        Closing += (_, e) => { if (reading) e.Cancel = true; };
         Content = new ScrollViewer { Content = panel, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
     }
 }

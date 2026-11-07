@@ -42,19 +42,19 @@ $nsisPath = (Get-Command makensis).Source
 ./scripts/package-installed.ps1 -SwiftRuntimeDirectory ./windows/artifacts/installer-runtime -Dotnet $dotnetPath -Makensis $nsisPath -OutputDirectory ./windows/artifacts/release
 ```
 
-当前版本为 `1.0.7`，后续从 `1.0.8` 递增。内部 `FileVersion` 使用四段形式（如 `1.0.7.0`），文件名和 Release tag 使用三段形式（如 `v1.0.7`）。可以通过 `-ReleaseTag` 显式指定；必须与实际 GitHub Release tag 完全一致。
+当前版本为 `1.0.8`，后续从 `1.0.9` 递增。内部 `FileVersion` 使用四段形式（如 `1.0.8.0`），文件名和 Release tag 使用三段形式（如 `v1.0.8`）。可以通过 `-ReleaseTag` 显式指定；必须与实际 GitHub Release tag 完全一致。
 
-1.0.7 的交付名称如下；仓库地址中的 `star-codex-switcher` 保持不变：
+1.0.8 的交付名称如下；仓库地址中的 `star-codex-switcher` 保持不变：
 
 | 用途 | 名称 |
 | --- | --- |
 | 显示标题、快捷方式、安装显示名 | `Star Codex Switcher` |
-| 安装包 | `Star-Codex-Switcher-1.0.7-Setup-x64.exe` |
+| 安装包 | `Star-Codex-Switcher-1.0.8-Setup-x64.exe` |
 | 固定最新版安装包 | `Star-Codex-Switcher-Setup-x64.exe` |
 | 安装后的主程序 | `StarCodexSwitcher.exe` |
 | 开发/打包中间应用 | `Star-Codex-Switcher-windows-x64.exe` |
 | 源码下载 | GitHub 自动提供的 `Source code (zip)` / `Source code (tar.gz)` |
-| 安装包校验文件 | `Star-Codex-Switcher-1.0.7-Setup-x64.exe.sha256` |
+| 安装包校验文件 | `Star-Codex-Switcher-1.0.8-Setup-x64.exe.sha256` |
 | 更新清单 | `update-installed.json` |
 
 安装脚本生成版本安装包、校验文件与更新清单。1.0.4–1.0.6 发布这三项资产；从 1.0.7 起按固定最新版直链要求，发布准备阶段从已验证版本包生成同内容的 `Star-Codex-Switcher-Setup-x64.exe`，共四项 Release 资产。这项新增要求替代原三项规则，不改变产品编译、打包脚本或 CI。固定名副本必须与版本包大小和 SHA-256 一致；不另传源码包，源码使用 GitHub 根据 tag 自动提供的 Source code (zip/tar.gz)。新用户默认安装路径为 `%LOCALAPPDATA%\Programs\Star Codex Switcher`；旧用户升级沿用现有安装位置。更名时保留既有账号数据目录、登录记录和设置存储。
@@ -90,7 +90,7 @@ $nsisPath = (Get-Command makensis).Source
 1. 先在本地完成代码和文档修改，更新版本号、`CHANGELOG.md`、软件内新版本提示与 Release 说明。提交标题和正文统一使用中文，说明具体变化及验证结果。
 2. 在本地编译、打包并运行相应检查；界面变化还需查看实际截图。验证失败先修复，不先提交一个尚未验证的发布版本。
 3. 在隔离 Windows 用户或测试机验证首次安装、旧安装位置升级、账号与设置保留、更新完成后启动、卸载，以及无 SDK 环境运行。使用合成或测试账号，不在发布资产中放入个人账号。
-4. 本地检查通过后正常提交源码并运行 CI，保留 1.0.0 及后续 Git 提交和 tag 历史，不重建分支历史。CI 通过后，创建与已验证构建一致的 tag（本次为 `v1.0.7`）；GitHub 会自动提供该 tag 的 Source code (zip/tar.gz)，无需另外制作源码包。
+4. 本地检查通过后正常提交源码并运行 CI，保留 1.0.0 及后续 Git 提交和 tag 历史，不重建分支历史。CI 通过后，创建与已验证构建一致的 tag（本次为 `v1.0.8`）；GitHub 会自动提供该 tag 的 Source code (zip/tar.gz)，无需另外制作源码包。
 5. 在 [GitHub Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 创建该 tag 的草稿 Release，上传版本安装包、对应 SHA-256 文件、`update-installed.json` 和固定名 `Star-Codex-Switcher-Setup-x64.exe` 四项资产。固定名 EXE 从同一已验证版本包复制，必须确认两个 EXE 的大小及 SHA-256 相同；不要先更新清单或发布 Latest，再补尚不可下载的固定名包。
 6. 四项草稿资产齐全、版本与摘要核对通过后，正式发布为 Latest，保留已有历史版本及其下载资产。
 7. 从公网重新下载 GitHub 版本包、固定最新版直链、校验文件和清单，确认两种 EXE 地址返回相同内容；核对 `download_url`、版本、包哈希与内置应用哈希，确认软件能检测到新版、提示文案一致。不能用草稿上传成功代替公开下载核验。
@@ -114,7 +114,7 @@ GitHub 保留历史安装包、Release、资产、提交和 tag，Latest 与软�
 
 ## 自有服务器下载镜像
 
-将同一已验证版本包及其 `.sha256` 同步到 `https://starsmsai.top/codex-switcher/`。本次文件名为 `Star-Codex-Switcher-1.0.7-Setup-x64.exe` 及对应 `.sha256`；先临时上传、核对摘要，再原子改名。固定名 `Star-Codex-Switcher-Setup-x64.exe` 使用指向同目录当前版本包的相对符号链接，避免额外保存一份物理包。新版本文件校验成功后，先创建临时链接，再原子替换固定名链接；切换过程中旧链接保持可用。核对链接目标在镜像目录内，并从版本地址完成一次公网全量下载、大小和 SHA-256 校验。
+将同一已验证版本包及其 `.sha256` 同步到 `https://starsmsai.top/codex-switcher/`。本次文件名为 `Star-Codex-Switcher-1.0.8-Setup-x64.exe` 及对应 `.sha256`；先临时上传、核对摘要，再原子改名。固定名 `Star-Codex-Switcher-Setup-x64.exe` 使用指向同目录当前版本包的相对符号链接，避免额外保存一份物理包。新版本文件校验成功后，先创建临时链接，再原子替换固定名链接；切换过程中旧链接保持可用。核对链接目标在镜像目录内，并从版本地址完成一次公网全量下载、大小和 SHA-256 校验。
 
 固定直链允许使用同一物理文件验证：服务器端确认固定名链接实际解析到本次已完整下载的版本文件，核对该目标的完整 SHA-256；随后从固定 HTTPS URL 发起公开 GET，验证 HTTP 状态、响应总长度及首 1 MiB 字节与已验证安装包一致。若使用 Range 请求，应同时核对 `Content-Range` 的范围和总长度。记录链接目标、目标摘要与两次公开请求的验证结果，不将内容抽查单独当作全包校验。固定入口是独立副本、返回不同内容，或无法确认同一物理目标时，必须完整下载固定直链并核对大小和 SHA-256。
 

@@ -37,6 +37,8 @@ internal static class RefreshResetChecks
             CountdownPresentation(window, () => displayNow = displayNow.AddMinutes(1), output);
             RefreshInteractions(window, client, output);
             ResetInteractions(window, client, native, output);
+            SilentAndAccountActions(app, window, client, native, output);
+            LocalAccountDialog(window, output);
             File.WriteAllText(Path.Combine(output, "refresh-reset-result.txt"), $"PASS: {assertions} refresh/reset presentation assertions; simulated requests only.");
             Console.WriteLine($"PASS: {assertions} refresh/reset assertions; actual WPF rotation, refresh scope, pending deduplication, success/error cleanup, scroll preservation, three expiry colors, live countdowns and confirmation consistency.");
         } finally {
@@ -177,6 +179,85 @@ internal static class RefreshResetChecks
         Check(client.Calls.Count == 4, "Refresh can be retried normally after an earlier failure.");
     }
     private static FrameworkElement ResetLine(DependencyObject owner) => All<FrameworkElement>(owner).Single(element => Name(element) == "重置卡到期");
+    private static void SilentAndAccountActions(App app, MainWindow window, Client client, NativeSettings native, string output)
+    {
+        client.Publish(client.State with { Error = null }); window.Navigate("accounts"); window.Height = 600; Pump(40);
+        var before = window.PageScrollViewer.Content;
+        client.Publish(client.State with { UsageRefreshRevision = client.State.UsageRefreshRevision + 1 }); Pump(30);
+        Check(ReferenceEquals(before, window.PageScrollViewer.Content) && !window.IsBusy && RefreshButtons(window).All(button => !Icon(button).RenderTransform.HasAnimatedProperties && button.IsEnabled),
+            "A timer revision with unchanged visible data neither rebuilds the list nor spins or disables controls.");
+        var active = client.State.ActiveAccountID;
+        var remove = Button(Cards(window)[0], "删除"); Check(remove.IsEnabled, "The current account exposes an enabled delete action.");
+        Click(remove); Pump(30);
+        Check(window.CurrentPage == "remove" && All<TextBlock>(window).Any(text => text.Text.Contains("不会退出 Codex 当前登录")) && client.RemovalCalls == 0,
+            "Removing the current account requires confirmation that explains the local-only effect.");
+        Capture(window, Path.Combine(output, "remove-current-confirm.png"));
+        Click(Button(window, "取消")); Pump(20);
+        Check(client.RemovalCalls == 0 && client.State.ActiveAccountID == active, "Cancelling current-account deletion leaves the account untouched.");
+        Click(Button(Cards(window)[0], "删除")); Pump(20); Click(Button(window, "删除")); Pump(30);
+        Check(client.RemovalCalls == 1 && client.State.Accounts.All(row => row.Profile.Id != active) && window.CurrentPage == "accounts",
+            "Confirmed current-account deletion sends exactly one targeted remove command and updates the list.");
+
+        var saved = client.State;
+        foreach (var dark in new[] { false, true }) {
+            native.ThemePreference = dark ? "dark" : "light";
+            client.Publish(saved with { Accounts = saved.Accounts.Select((row, index) => row with {
+                UsageError = index == 0 ? QuotaReadException.Unauthorized : index == 1 ? QuotaReadException.ProxyTimeout : null
+            }).ToArray() }); window.Navigate("accounts"); window.Width = 1150; window.Height = 850; Pump(50);
+            var cards = Cards(window); var expired = cards[0]; var network = cards[1];
+            var title = All<TextBlock>(expired).Single(text => text.Text == "登录已失效");
+            var alert = All<Border>(expired).Single(border => Name(border) == "登录失效提示");
+            Check(title.FontSize >= 16 && title.FontWeight.ToOpenTypeWeight() >= FontWeights.SemiBold.ToOpenTypeWeight() && Equals(title.Foreground, app.Resources["Danger"]) && Equals(alert.Background, app.Resources["DangerSurface"]),
+                "401 uses a prominent red title and dedicated tinted alert in both themes.");
+            Check(All<TextBlock>(expired).Any(text => text.Text.Contains("显示上次额度")) && !window.IsBusy && !Icon(Button(expired, "刷新此账号")).RenderTransform.HasAnimatedProperties,
+                "A persistent authentication alert identifies cached quota without showing a timer spinner or blocking the page.");
+            var switchExpired = Button(expired, client.State.Accounts[0].Profile.Email!);
+            Check(!switchExpired.IsEnabled && Button(expired, "恢复登录").IsEnabled, "Expired sign-in disables switching and exposes the recovery action.");
+            var calls = client.OtherCalls; Click(switchExpired); Pump(20);
+            Check(window.CurrentPage == "accounts" && client.OtherCalls == calls, "Even a stale disabled switch callback cannot open a confirmation for a known expired login.");
+            Check(!All<TextBlock>(network).Any(text => text.Text == "登录已失效") && Equals(All<Border>(network).Single(border => Name(border) == "刷新失败提示").Background, app.Resources["WarningSurface"]) && Button(network, client.State.Accounts[1].Profile.Email!).IsEnabled,
+                "A VPN/proxy timeout uses an amber refresh warning and is not treated as expired authentication.");
+            Capture(window, Path.Combine(output, $"account-auth-status-{(dark ? "dark" : "light")}.png"));
+            Exception? dialogFailure = null;
+            window.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => {
+                var dialog = app.Windows.OfType<AddAccountWindow>().Single(); dialog.UpdateLayout();
+                try {
+                    Check(All<Button>(dialog).Any(button => Name(button) == "获取本地账号") && All<Button>(dialog).Any(button => Name(button) == "JSON 导入") && !All<Button>(dialog).Any(button => Name(button) == "浏览器授权"),
+                        "Recovery exposes the supported local and JSON routes without a duplicate-account browser route.");
+                    Check(All<TextBlock>(dialog).Any(text => text.Text.Contains("先在 Codex 中重新登录")), "Recovery explains how the current local login must be renewed first.");
+                    Capture(dialog, Path.Combine(output, $"restore-login-{(dark ? "dark" : "light")}.png"));
+                } catch (Exception ex) { dialogFailure = ex; } finally { dialog.Close(); }
+            }));
+            Click(Button(expired, "恢复登录")); if (dialogFailure != null) throw dialogFailure;
+            Click(Button(Cards(window)[1], client.State.Accounts[1].Profile.Email!)); Pump(20);
+            Check(window.CurrentPage == "switch", "A transient network error still permits explicit switch preflight.");
+            var targetId = client.State.Accounts[1].Profile.Id;
+            client.Publish(client.State with { Accounts = client.State.Accounts.Select(row => row.Profile.Id == targetId ? row with { UsageError = QuotaReadException.Unauthorized } : row).ToArray() }); Pump(20);
+            var confirm = Button(window, "切换账号"); var count = client.OtherCalls; Click(confirm); Pump(20);
+            Check(!confirm.IsEnabled && client.OtherCalls == count, "A 401 arriving while confirmation is open prevents the stale confirmation from switching.");
+            client.Publish(saved); window.Navigate("accounts"); Pump(20);
+            Check(Button(Cards(window)[0], client.State.Accounts[0].Profile.Email!).IsEnabled && !All<TextBlock>(window).Any(text => text.Text == "登录已失效"),
+                "A successful refreshed state removes the expiration alert and restores switching.");
+        }
+    }
+    private static void LocalAccountDialog(MainWindow owner, string output)
+    {
+        var calls = 0;
+        TaskCompletionSource gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dialog = new AddAccountWindow(true, true, async () => { calls++; await gate.Task; }) { Owner = owner };
+        dialog.Show(); Pump(30);
+        var local = Button(dialog, "获取本地账号"); Click(local); Pump(20);
+        Check(calls == 1 && All<Button>(dialog).All(button => !button.IsEnabled) && All<TextBlock>(dialog).Any(text => text.Text == "正在读取本地账号…"),
+            "Getting the local account shows pending state and prevents duplicate operations.");
+        Click(local); dialog.Close(); Pump(20);
+        Check(calls == 1 && dialog.IsVisible, "Repeated local reads and closing are blocked while the request is pending.");
+        gate.SetException(new IOException("The active Codex auth.json file is missing.")); PumpUntil(() => local.IsEnabled);
+        Check(dialog.IsVisible && All<TextBlock>(dialog).Any(text => text.Text.Contains("请先完成登录")) && !All<TextBlock>(dialog).Any(text => text.Text.StartsWith("The active Codex")),
+            "A missing local login stays open with a Chinese explanation and permits retry.");
+        Capture(dialog, Path.Combine(output, "get-local-account-error.png"));
+        gate = new(TaskCreationOptions.RunContinuationsAsynchronously); Click(local); gate.SetResult(); PumpUntil(() => !dialog.IsVisible);
+        Check(calls == 2 && dialog.SelectedMethod == AddAccountMethod.Local, "Successful local retrieval closes the chooser after completion.");
+    }
     private static void ResetInteractions(MainWindow window, Client client, NativeSettings native, string output)
     {
         const string confirmName = "确认重置 · 消耗 1 张";
@@ -297,14 +378,17 @@ internal static class RefreshResetChecks
         var bitmap = new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth * 1.5), (int)Math.Ceiling(window.ActualHeight * 1.5), 144, 144, PixelFormats.Pbgra32); bitmap.Render(visual);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap)); using var stream = File.Create(path); encoder.Save(stream);
     }
-    private sealed class Client : IAccountClient
+    private sealed class Client : IAccountClient, IAccountImporter
     {
         public event Action? Changed;
         public readonly List<Guid?> Calls = [];
+        public int RemovalCalls, OtherCalls;
         private TaskCompletionSource? pending;
         private TaskCompletionSource? resetPending;
         public readonly List<Guid?> ResetCalls = [];
         public AccountSnapshot State { get; private set; }
+        public Task<ImportResult> ImportTextAsync(string json) => Task.FromResult(new ImportResult(1, 0, 0));
+        public Task<ImportResult> ImportFilesAsync(string[] paths) => Task.FromResult(new ImportResult(1, 0, 0));
         public Client() {
             var offsets = new TimeSpan?[] { TimeSpan.FromDays(5), TimeSpan.FromDays(2), TimeSpan.FromHours(8), TimeSpan.FromHours(-1), null, TimeSpan.FromDays(8) };
             var rows = offsets.Select((offset, index) => new AccountRow(new(Guid.NewGuid(), "Synthetic", $"reset-{index + 1}@example.test"), "R",
@@ -313,18 +397,24 @@ internal static class RefreshResetChecks
             State = AccountSnapshot.Empty with { Accounts = rows, ActiveAccountID = rows[0].Profile.Id, Settings = new("simplifiedChinese") };
         }
         public Task CommandAsync(string command, Guid? accountID = null, bool? value = null, string? language = null) {
+            if (command == "remove") {
+                RemovalCalls++;
+                Publish(State with { Accounts = State.Accounts.Where(row => row.Profile.Id != accountID).ToArray(), ActiveAccountID = State.ActiveAccountID == accountID ? null : State.ActiveAccountID });
+                return Task.CompletedTask;
+            }
             if (command == "resetQuota") {
                 ResetCalls.Add(accountID);
                 if (resetPending != null) throw new Exception("The UI submitted an overlapping synthetic reset.");
                 State = State with { Error = null };
                 resetPending = new(TaskCreationOptions.RunContinuationsAsynchronously); return resetPending.Task;
             }
-            if (command != "refresh") return Task.CompletedTask;
+            if (command != "refresh") { OtherCalls++; return Task.CompletedTask; }
             Calls.Add(accountID);
             if (pending != null) throw new Exception("The UI submitted an overlapping synthetic refresh.");
             pending = new(TaskCreationOptions.RunContinuationsAsynchronously); return pending.Task;
         }
         public void Notify() => Changed?.Invoke();
+        public void Publish(AccountSnapshot state) { State = state; Notify(); }
         public void Release(Exception? error = null) { var completion = pending; pending = null; if (error == null) completion?.TrySetResult(); else completion?.TrySetException(error); }
         public void PrepareReset() {
             State = State with { Error = null, Accounts = State.Accounts.Select((row, index) => index == 2 ? row with { Usage = row.Usage! with { ResetCreditsRemaining = 2 } } : row).ToArray() };

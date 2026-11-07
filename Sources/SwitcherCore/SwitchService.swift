@@ -28,6 +28,7 @@ public struct SwitchService: SwitchServicing {
         let target: AccountProfile
         let originalActiveID: UUID?
         let originalProfile: AccountProfile?
+        let removedCredential: Data?
         do {
             target = try await store.profile(id: targetID)
         } catch {
@@ -42,9 +43,12 @@ public struct SwitchService: SwitchServicing {
                     throw AccountStoreError.activeProfileMissing
                 }
                 originalProfile = profile
+                removedCredential = nil
             } else {
-                guard await !store.activeCredentialExists() else {
-                    throw AccountStoreError.activeProfileMissing
+                if await store.activeCredentialExists() {
+                    removedCredential = try await store.removedActiveCredentialSnapshot()
+                } else {
+                    removedCredential = nil
                 }
                 originalProfile = nil
             }
@@ -65,6 +69,10 @@ public struct SwitchService: SwitchServicing {
                     throw AccountStoreError.activeCredentialMismatch
                 }
                 try await store.saveCurrentCredential()
+            } else if let removedCredential {
+                guard try await store.removedActiveCredentialSnapshot() == removedCredential else {
+                    throw AccountStoreError.activeCredentialMismatch
+                }
             } else if await store.activeCredentialExists() {
                 throw AccountStoreError.activeCredentialMismatch
             }
@@ -86,6 +94,8 @@ public struct SwitchService: SwitchServicing {
         } catch {
             throw await restoringOriginalCredential(
                 originalActiveID: originalActiveID,
+                removedCredential: removedCredential,
+                replacingProfileID: targetID,
                 failedStage: .verifyTargetIdentity,
                 originalError: error
             )
@@ -96,6 +106,8 @@ public struct SwitchService: SwitchServicing {
         } catch {
             throw await restoringOriginalCredential(
                 originalActiveID: originalActiveID,
+                removedCredential: removedCredential,
+                replacingProfileID: targetID,
                 failedStage: .commitActiveAccountID,
                 originalError: error
             )
@@ -110,12 +122,16 @@ public struct SwitchService: SwitchServicing {
 
     private func restoringOriginalCredential(
         originalActiveID: UUID?,
+        removedCredential: Data?,
+        replacingProfileID: UUID,
         failedStage: SwitchStage,
         originalError: any Error
     ) async -> OperationError {
         do {
             if let originalActiveID {
                 try await store.restoreActiveCredential(id: originalActiveID)
+            } else if let removedCredential {
+                try await store.restoreRemovedActiveCredential(removedCredential, replacingProfileID: replacingProfileID)
             } else {
                 try await store.clearActiveCredential()
             }

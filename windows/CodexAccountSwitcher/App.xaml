@@ -21,6 +21,7 @@
   <SolidColorBrush x:Key="Warning" Color="#9B5C00"/>
   <SolidColorBrush x:Key="WarningSurface" Color="#FFF4D9"/>
   <SolidColorBrush x:Key="Danger" Color="#C63943"/>
+  <SolidColorBrush x:Key="DangerSurface" Color="#FFF0F1"/>
   <SolidColorBrush x:Key="OnAccent" Color="#FFFFFF"/>
   <Style TargetType="Window">
    <Setter Property="FontFamily" Value="Segoe UI, Microsoft YaHei UI"/>

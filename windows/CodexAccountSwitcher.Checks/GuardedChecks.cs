@@ -76,10 +76,22 @@ internal static class GuardedChecks
             Require(imports.Length == 3, "Import must preserve distinct workspaces with same email");
             var data = Path.Combine(root, "data");
             var imported = AccountImport.Commit(data, active, imports);
-            Require(imported.Added == 2 && imported.SkippedActive == 1, "Active login must be skipped; two new accounts added");
+            Require(imported.Added == 3 && imported.SkippedActive == 0, "An unsaved local active account can be imported without changing its live login");
             imported = AccountImport.Commit(data, active, imports);
-            Require(imported.Updated == 2 && imported.Added == 0, "Duplicate workspace must update rather than duplicate");
+            Require(imported.Updated == 2 && imported.Added == 0 && imported.SkippedActive == 1, "An already saved active account remains protected from imported credential replacement");
             Require(File.ReadAllBytes(Path.Combine(active, "auth.json")).SequenceEqual(a.Bytes), "Import changed active auth");
+            var restoreData = Path.Combine(root, "removed-current"); Directory.CreateDirectory(restoreData);
+            File.WriteAllText(Path.Combine(restoreData, "accounts.json"), new JsonObject {
+                ["accounts"] = new JsonArray(), ["extensionData"] = "preserved",
+                ["removedAccountIdentities"] = new JsonArray(new JsonObject { ["accountID"] = a.AccountID, ["email"] = a.Email },
+                    new JsonObject { ["accountID"] = "unrelated-workspace", ["email"] = a.Email })
+            }.ToJsonString());
+            var restored = AccountImport.Commit(restoreData, active, [a]);
+            var restoredRegistry = JsonNode.Parse(File.ReadAllBytes(Path.Combine(restoreData, "accounts.json")))!;
+            Require(restored.Added == 1 && restored.SkippedActive == 0 && restoredRegistry["removedAccountIdentities"]!.AsArray().Count == 1 &&
+                restoredRegistry["removedAccountIdentities"]![0]!["accountID"]!.GetValue<string>() == "unrelated-workspace" && restoredRegistry["extensionData"]!.GetValue<string>() == "preserved",
+                "Explicit JSON re-import restores a removed active profile, clears only its matching suppression marker, and preserves unrelated registry fields");
+            Require(File.ReadAllBytes(Path.Combine(active, "auth.json")).SequenceEqual(a.Bytes), "Restoring a removed current profile through JSON must not rewrite the active auth file");
             File.WriteAllText(file, "[{\"access_token\":\"masked***\"}]");
             await Throws(() => { AccountImport.ParseFiles([file]); return Task.CompletedTask; });
             File.WriteAllText(file, "not json SECRET_MARKER");

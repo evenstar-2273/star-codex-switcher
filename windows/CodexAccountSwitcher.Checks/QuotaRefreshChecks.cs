@@ -12,6 +12,8 @@ internal static class QuotaRefreshChecks
         try {
             await ManagedAsync();
             await InitialResetCycleAsync();
+            await SilentDeleteAsync();
+            await AuthenticationGuardAsync();
             await SettingFailureAsync();
             if (host != null) {
                 await GuardedHostSettingAsync(Path.GetFullPath(host));
@@ -132,7 +134,7 @@ internal static class QuotaRefreshChecks
             fixture.Runtime.Publish(fixture.Runtime.State with { Settings = fixture.Runtime.State.Settings with { AutoResetEnabled = true } });
             fixture.ReadRemaining = 100; fixture.Credits.Available = 0;
             fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = 1 });
-            Check(fixture.TotalReads == 2 && client.State.IsMutating, "A completed first host reset waits for the pending fast read without starting an overlapping batch.");
+            Check(fixture.TotalReads == 2 && !client.State.IsMutating, "A completed first host reset waits for the pending fast read without overlapping or making background work visibly busy.");
             fixture.ReadGate.SetResult(); await Idle(client); fixture.ReadGate = null;
             Check(fixture.TotalReads == 4 && client.State.Accounts.All(row => row.Usage?.RemainingPercent == 100 && row.Usage.ResetCreditsRemaining == 0),
                 "A fast read started before auto reset was enabled cannot falsely consume the completed first-cycle revision when it returns late.");
@@ -181,11 +183,8 @@ internal static class QuotaRefreshChecks
         fixture.ReadGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
         fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = fixture.Runtime.State.UsageRefreshRevision + 1 });
         await Until(() => fixture.ActiveReads == 2);
-        Check(client.State.IsMutating, "A scheduled direct batch publishes its busy state before account operations can start.");
+        Check(!client.State.IsMutating && client.State.Error == null, "A scheduled direct batch stays silent without publishing busy state or a global message.");
         var hostCommands = fixture.Runtime.Calls;
-        await client.CommandAsync("refresh"); await client.CommandAsync("remove", fixture.IDs[0]);
-        Check(fixture.Runtime.Calls == hostCommands, "Manual refresh and account mutations cannot overlap a pending scheduled batch.");
-        await Reject(() => client.CommandAsync("quotaRefreshInterval", language: "10"));
         var pendingReads = fixture.TotalReads;
         fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = fixture.Runtime.State.UsageRefreshRevision + 1 });
         fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = fixture.Runtime.State.UsageRefreshRevision + 1 });
@@ -193,6 +192,7 @@ internal static class QuotaRefreshChecks
         fixture.ReadGate.SetResult(); await Idle(client); fixture.ReadGate = null;
         Check(fixture.TotalReads == pendingReads + 2, "Multiple host cycles arriving during a slow read coalesce into one catch-up batch for the newest revision.");
         Check(fixture.MaximumReads <= 2 && fixture.ActiveReads == 0, "Concurrent reads remain bounded to one read per fixture account.");
+        Check(fixture.Runtime.Calls == hostCommands && !client.State.IsMutating, "Background completion neither forwards a foreground command nor leaves the UI disabled.");
 
         var retained = client.State.Accounts.Select(row => row.Usage).ToArray();
         fixture.FailReads = true;
@@ -203,6 +203,7 @@ internal static class QuotaRefreshChecks
         Check(fixture.TotalReads == failedCount, "Failed quota reads consume the cycle instead of creating an automatic retry loop.");
         Check(client.State.Accounts.Select((row, index) => row.Usage?.RemainingPercent == retained[index]?.RemainingPercent && row.UsageError != null).All(value => value),
             "A failed refresh preserves each account's previous direct quota and attaches an error.");
+        Check(client.State.Error == null && !client.State.IsMutating, "A timer failure remains a per-card status and never opens a global error or busy state.");
         fixture.FailReads = false;
         await client.CommandAsync("refresh"); await Idle(client);
         Check(client.State.Accounts.All(row => row.UsageError == null), "An explicit retry clears failed-read state after succeeding.");
@@ -218,6 +219,62 @@ internal static class QuotaRefreshChecks
         fixture.ReplaceCredential(0); fixture.Runtime.Publish(fixture.Runtime.State); await Idle(client);
         Check(fixture.TotalReads == readsBeforeCredentialChange + 1, "Credential replacement still forces an initial read independently of the periodic setting.");
         Check(File.ReadAllBytes(fixture.ActiveCredential).SequenceEqual(fixture.OriginalBytes), "All scheduling tests preserve the active authentication bytes.");
+    }
+    private static async Task SilentDeleteAsync()
+    {
+        using var fixture = new Fixture();
+        await using var client = fixture.Client;
+        await client.InitializeAsync(); await Idle(client);
+        var previous = client.State.Accounts.Select(row => row.Usage).ToArray();
+        fixture.ReadGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = 2,
+            Accounts = fixture.Runtime.State.Accounts.Select(row => row with { UsageStatus = "loading", Usage = null }).ToArray() });
+        await Until(() => fixture.ActiveReads == 2);
+        Check(!client.State.IsMutating && client.State.Accounts.Select((row, index) => row.Usage == previous[index] && row.UsageStatus == "loaded").All(value => value),
+            "Pending host/direct timer reads preserve loaded quotas without a loading placeholder or global busy state.");
+        var calls = fixture.Runtime.Calls;
+        var remove = client.CommandAsync("remove", fixture.IDs[0]);
+        await Task.Delay(30);
+        Check(!remove.IsCompleted && fixture.Runtime.Calls == calls && client.State.IsMutating,
+            "A user deletion waits behind the silent read and becomes visibly busy only after the explicit user command.");
+        await client.CommandAsync("remove", fixture.IDs[0]);
+        Check(fixture.Runtime.Calls == calls, "A repeated deletion cannot queue a second mutation behind the first foreground waiter.");
+        fixture.ReadGate.SetResult(); await remove; fixture.ReadGate = null; await Idle(client);
+        Check(fixture.Runtime.Calls == calls + 1 && client.State.Accounts.All(row => row.Profile.Id != fixture.IDs[0]),
+            "The queued delete is delivered exactly once after the background read completes.");
+        fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = 3 }); await Idle(client);
+        Check(client.State.Accounts.Length == 1 && !client.State.IsMutating && File.ReadAllBytes(fixture.ActiveCredential).SequenceEqual(fixture.OriginalBytes),
+            "Later timer snapshots do not restore the removed row or modify the active credential.");
+        fixture.ReadGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = 4 }); await Until(() => fixture.ActiveReads == 1);
+        var manual = client.CommandAsync("refresh"); await Task.Delay(30);
+        Check(!manual.IsCompleted && client.State.IsMutating, "Manual refresh waits behind the timer instead of silently losing the user's click.");
+        fixture.ReadGate.SetResult(); await manual; fixture.ReadGate = null; await Idle(client);
+        Check(!client.State.IsMutating, "The foreground refresh releases its busy state after the actual readback completes.");
+    }
+    private static async Task AuthenticationGuardAsync()
+    {
+        using var fixture = new Fixture();
+        await using var client = fixture.Client; await client.InitializeAsync(); await Idle(client);
+        fixture.ReadFailure = new QuotaReadException(QuotaReadException.Unauthorized);
+        fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = 2 }); await Idle(client);
+        var commands = fixture.Runtime.Calls;
+        await client.CommandAsync("switch", fixture.IDs[1]);
+        Check(fixture.Runtime.Calls == commands && client.State.Error?.Contains("登录已失效") == true,
+            "The guarded backend refuses a known 401 account even when a caller bypasses the UI.");
+        foreach (var failure in new[] { QuotaReadException.Timeout, QuotaReadException.ProxyConnection, QuotaReadException.Forbidden })
+            Check(!QuotaReadException.IsAuthenticationFailure(failure), "Transient network, VPN and permission errors are not authentication-expired classifications.");
+        fixture.ReadFailure = null;
+        fixture.ReplaceCredential(1);
+        await client.CommandAsync("switch", fixture.IDs[1]); await Idle(client);
+        Check(fixture.Runtime.Calls > commands && client.State.Error == null,
+            "Replacing credential bytes invalidates the old 401 and restores the normal validated switch path instead of permanently locking the account.");
+        fixture.ReadFailure = new QuotaReadException(QuotaReadException.Unauthorized);
+        fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = 3 }); await Idle(client);
+        fixture.ReadFailure = null; await client.CommandAsync("refresh"); await Idle(client);
+        Check(client.State.Accounts.All(row => !QuotaReadException.IsAuthenticationFailure(row.UsageError)),
+            "A successful explicit quota retry removes the authentication-expired state.");
+        Check(File.ReadAllBytes(fixture.ActiveCredential).SequenceEqual(fixture.OriginalBytes), "Authentication guards and synthetic retries preserve the active login bytes.");
     }
     private static async Task HostAsync(string host)
     {
@@ -277,7 +334,11 @@ internal static class QuotaRefreshChecks
         foreach (var item in cache.ToArray()) cache[item.Key] = item.Value with { At = DateTimeOffset.UtcNow.AddDays(-1) };
     }
     private static async Task Reject(Func<Task> action) { try { await action(); } catch (IOException) { passed++; return; } throw new Exception("Invalid or unavailable settings operation was not rejected."); }
-    private static async Task Idle(GuardedAccountClient client) { await Until(() => !client.State.IsMutating); await Task.Delay(35); await Until(() => !client.State.IsMutating); }
+    private static async Task Idle(GuardedAccountClient client) {
+        bool Settled() => !client.State.IsMutating &&
+            (typeof(GuardedAccountClient).GetField("automaticUsageTask", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(client) is not Task pending || pending.IsCompleted);
+        await Until(Settled); await Task.Delay(35); await Until(Settled);
+    }
     private static async Task Until(Func<bool> condition, int timeout = 5000) {
         var started = System.Diagnostics.Stopwatch.StartNew();
         while (!condition()) { if (started.ElapsedMilliseconds > timeout) throw new TimeoutException("Quota fixture did not reach expected state."); await Task.Delay(15); }
@@ -291,6 +352,7 @@ internal static class QuotaRefreshChecks
         public int TotalReads => Reads.Values.Sum();
         public TaskCompletionSource? ReadGate;
         public bool FailReads;
+        public Exception? ReadFailure;
         public int ReadRemaining = 80;
         public readonly Credits Credits = new();
         public readonly Runtime Runtime;
@@ -313,6 +375,7 @@ internal static class QuotaRefreshChecks
             try {
                 if (ReadGate != null) await ReadGate.Task.WaitAsync(ct);
                 if (FailReads) throw new IOException("synthetic network failure");
+                if (ReadFailure != null) throw ReadFailure;
                 return new(remaining, DateTimeOffset.UtcNow.AddDays(1), 90, DateTimeOffset.UtcNow.AddHours(2), 2);
             } finally { Interlocked.Decrement(ref ActiveReads); }
         }
@@ -331,6 +394,8 @@ internal static class QuotaRefreshChecks
             Calls++;
             if (CommandGate != null) await CommandGate.Task;
             if (command == "refresh") Publish(State with { UsageRefreshRevision = State.UsageRefreshRevision + 1 });
+            if (command == "remove") Publish(State with { Accounts = State.Accounts.Where(row => row.Profile.Id != accountID).ToArray(),
+                ActiveAccountID = State.ActiveAccountID == accountID ? null : State.ActiveAccountID });
             if (command == "quotaRefreshInterval") {
                 if (SettingError != null) throw SettingError;
                 Publish(State with { Settings = State.Settings with { QuotaRefreshIntervalMinutes = int.Parse(language!, System.Globalization.CultureInfo.InvariantCulture) } });

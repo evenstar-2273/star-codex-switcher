@@ -15,7 +15,14 @@ public protocol AccountStoring: Sendable {
     func saveCurrentCredential() async throws
     func activateTargetCredential(id: UUID) async throws
     func restoreActiveCredential(id: UUID) async throws
+    func removedActiveCredentialSnapshot() async throws -> Data
+    func restoreRemovedActiveCredential(_ credential: Data, replacingProfileID: UUID) async throws
     func commitActiveAccountID(_ id: UUID) async throws
+}
+
+extension AccountStoring {
+    public func removedActiveCredentialSnapshot() async throws -> Data { throw AccountStoreError.activeProfileMissing }
+    public func restoreRemovedActiveCredential(_ credential: Data, replacingProfileID: UUID) async throws { throw AccountStoreError.activeProfileMissing }
 }
 
 public actor AccountStore: AccountStoring {
@@ -26,6 +33,8 @@ public actor AccountStore: AccountStoring {
     private let legacyBaseURL: URL?
     private var registry: AccountRegistry?
     private var usageCache: UsageCache?
+    /// Set only when the last successful sync recognized a login deliberately removed from this tool.
+    public private(set) var activeCredentialWasRemoved = false
 
     public init(
         baseURL: URL? = nil,
@@ -222,6 +231,8 @@ public actor AccountStore: AccountStoring {
         try secureAtomicWrite(credential, to: home.appending(path: "auth.json"))
 
         var current = try loadRegistry()
+        let identity = AccountIdentity(accountID: profile.accountID, email: profile.email)
+        current.removedAccountIdentities.removeAll { identity.matches($0) }
         current.accounts.append(profile)
         current.activeAccountID = profile.id
         try saveRegistry(current)
@@ -239,6 +250,7 @@ public actor AccountStore: AccountStoring {
         guard !current.accounts.contains(where: { identity.matches($0) }) else {
             throw AccountStoreError.duplicateAccount
         }
+        current.removedAccountIdentities.removeAll { identity.matches($0) }
         current.accounts.append(profile)
         // This actor owns the commit; cancellation while waiting to enter it must not save a login.
         try Task.checkCancellation()
@@ -252,10 +264,14 @@ public actor AccountStore: AccountStoring {
     }
 
     private func registerActiveIdentity(_ identity: AccountIdentity, credential bytes: Data) throws {
-        let current = try loadRegistry()
+        var current = try loadRegistry()
         if let profile = current.accounts.first(where: { identity.matches($0) }) {
             let destination = profileHome(id: profile.id).appending(path: "auth.json")
             if try readChecked(destination) != bytes { try secureAtomicWrite(bytes, to: destination) }
+            if current.removedAccountIdentities.contains(where: { identity.matches($0) }) {
+                current.removedAccountIdentities.removeAll { identity.matches($0) }
+                try saveRegistry(current)
+            }
             if current.activeAccountID != profile.id { try commitActiveAccountID(profile.id) }
         } else {
             let candidate = AccountProfile(id: UUID(), displayName: identity.suggestedDisplayName,
@@ -265,7 +281,8 @@ public actor AccountStore: AccountStoring {
     }
 
     /// The live login determines the active profile. Identify and save the same credential bytes.
-    public func syncActiveCredential() throws -> AccountRegistry {
+    public func syncActiveCredential(includeRemoved: Bool = false) throws -> AccountRegistry {
+        activeCredentialWasRemoved = false
         var current = try loadRegistry()
         guard activeCredentialExists() else {
             if current.activeAccountID != nil {
@@ -278,16 +295,23 @@ public actor AccountStore: AccountStoring {
         guard let identity = try CredentialIdentity.decode(bytes) else {
             throw CodexClientError.identityUnavailable
         }
+        if !includeRemoved,
+           !current.accounts.contains(where: { identity.matches($0) }),
+           current.removedAccountIdentities.contains(where: { identity.matches($0) }) {
+            if current.activeAccountID != nil {
+                current.activeAccountID = nil
+                try saveRegistry(current)
+            }
+            activeCredentialWasRemoved = true
+            return current
+        }
         try registerActiveIdentity(identity, credential: bytes)
         return try loadRegistry()
     }
 
     public func removeAccount(id: UUID) throws {
         var current = try loadRegistry()
-        guard current.activeAccountID != id else {
-            throw AccountStoreError.cannotRemoveActiveAccount
-        }
-        guard current.accounts.contains(where: { $0.id == id }) else {
+        guard let profile = current.accounts.first(where: { $0.id == id }) else {
             throw AccountStoreError.profileNotFound
         }
         var cache = try loadUsageCache()
@@ -297,6 +321,11 @@ public actor AccountStore: AccountStoring {
         }
         let original = current
         current.accounts.removeAll(where: { $0.id == id })
+        if current.activeAccountID == id { current.activeAccountID = nil }
+        let identity = AccountIdentity(accountID: profile.accountID, email: profile.email)
+        if !current.removedAccountIdentities.contains(where: { identity.matches($0) }) {
+            current.removedAccountIdentities.append(identity)
+        }
         try saveRegistry(current)
         do {
             try removeProfileDirectory(profileHome(id: id))
@@ -339,6 +368,34 @@ public actor AccountStore: AccountStoring {
 
     public func restoreActiveCredential(id: UUID) throws {
         try installCredential(id: id)
+    }
+
+    /// Keep the unlisted login only in the switching transaction; do not recreate its saved profile.
+    public func removedActiveCredentialSnapshot() throws -> Data {
+        let bytes = try readChecked(activeHomeURL.appending(path: "auth.json"))
+        try validateRemovedCredential(bytes)
+        return bytes
+    }
+
+    public func restoreRemovedActiveCredential(_ credential: Data, replacingProfileID: UUID) throws {
+        try validateRemovedCredential(credential)
+        let activePath = activeHomeURL.appending(path: "auth.json")
+        let currentBytes = try readChecked(activePath)
+        if currentBytes == credential { return }
+        _ = try profile(id: replacingProfileID)
+        let installedBytes = try readChecked(profileHome(id: replacingProfileID).appending(path: "auth.json"))
+        guard currentBytes == installedBytes else { throw AccountStoreError.activeCredentialMismatch }
+        try secureAtomicWrite(credential, to: activePath)
+    }
+
+    private func validateRemovedCredential(_ credential: Data) throws {
+        let current = try loadRegistry()
+        guard current.activeAccountID == nil,
+              let identity = try CredentialIdentity.decode(credential),
+              !current.accounts.contains(where: { identity.matches($0) }),
+              current.removedAccountIdentities.contains(where: { identity.matches($0) }) else {
+            throw AccountStoreError.activeProfileMissing
+        }
     }
 
     private func installCredential(id: UUID) throws {

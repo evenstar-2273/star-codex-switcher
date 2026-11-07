@@ -388,15 +388,28 @@ struct AccountControllerTests {
         #expect(await fixture.client.consumeCalls == 1)
     }
 
-    @Test func activeProfileCannotBeRemoved() async throws {
+    @Test func activeProfileRemovalPreservesTheLiveLogin() async throws {
         let fixture = try ControllerFixture()
         defer { fixture.clean() }
         try fixture.writeActiveCredential()
         await fixture.model.start()
         let id = try #require(fixture.model.activeAccountID)
+        let auth = fixture.active.appendingPathComponent("auth.json")
+        let credential = try Data(contentsOf: auth)
         await fixture.model.removeAccount(id: id)
+        await fixture.model.waitForWeeklyUsageRefresh()
+        #expect(fixture.model.accounts.isEmpty)
+        #expect(fixture.model.activeAccountID == nil)
+        #expect(fixture.model.activeIdentityConfirmed)
+        #expect(fixture.model.visibleError == nil)
+        #expect(try Data(contentsOf: auth) == credential)
+        await fixture.model.registerCurrentAccount()
+        await fixture.model.waitForWeeklyUsageRefresh()
         #expect(fixture.model.accounts.count == 1)
-        #expect(fixture.model.visibleError != nil)
+        #expect(fixture.model.activeAccountID != nil)
+        #expect(fixture.model.activeAccountID != id)
+        #expect(fixture.model.visibleError == nil)
+        #expect(try Data(contentsOf: auth) == credential)
     }
 
     @Test func snapshotContainsPresentationButNoCredentialContents() async throws {

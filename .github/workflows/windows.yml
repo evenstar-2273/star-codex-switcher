@@ -42,7 +42,7 @@ jobs:
       - name: Check cancellable authorization
         shell: pwsh
         run: |
-          swift test --filter 'AccountCancellationTests|AccountControllerTests|QuotaRefreshSettingsTests'
+          swift test --filter 'AccountCancellationTests|AccountControllerTests|QuotaRefreshSettingsTests|AccountRemovalTests|CredentialSyncTests|SwitchServiceTests'
           if ($LASTEXITCODE -ne 0) { throw 'Swift cancellation checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- login-cancel ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Authorization cancellation checks failed.' }
@@ -51,6 +51,8 @@ jobs:
         run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- storage-paths ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Storage directory compatibility checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- account-removal ./windows/artifacts/installer-runtime/SwitcherHost.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Current account removal checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- guarded ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Guarded checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- plans

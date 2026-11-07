@@ -40,6 +40,7 @@ public static class WindowsLocalization
             QuotaReadException.MissingWindow => "The service has not returned a recognized quota window. Refresh again later.",
             QuotaReadException.RequestFailed => "The quota request failed. Try again later.",
             "读取额度失败，请检查网络后重试。" => "Quota refresh failed. Check your network and retry.",
+            "该账号登录已失效，请先恢复登录后再切换。" => "This account's sign-in has expired. Restore sign-in before switching.",
             _ => message
         };
         var storageError = PrivateStorageError(message);
@@ -49,7 +50,7 @@ public static class WindowsLocalization
             "The account profile could not be found." => "找不到该账号的本地记录。",
             "No active account profile is configured." => "尚未设置当前账号。",
             "The active Codex auth.json file is missing." => "当前 Codex 登录凭据 auth.json 不存在，请先完成登录。",
-            "Codex is signed in to a different account than Switcher expects. No saved credential was overwritten. Use Register Current Account to associate the current login before switching." => "Codex 当前登录与工具记录的账号不一致，已保存的凭据未被覆盖。请先点击“保存当前登录”，再切换账号。",
+            "Codex is signed in to a different account than Switcher expects. No saved credential was overwritten. Use Register Current Account to associate the current login before switching." => "Codex 当前登录与工具记录的账号不一致，已保存的凭据未被覆盖。请先在“添加账号”中选择“获取本地账号”，再切换账号。",
             "The selected account has no saved auth.json file." => "所选账号没有保存的 auth.json 凭据，请重新导入或登录。",
             "This account is already saved. Select the existing account instead." => "该账号已保存，请选择已有账号。",
             "The active account cannot be removed." => "不能删除当前正在使用的账号。",

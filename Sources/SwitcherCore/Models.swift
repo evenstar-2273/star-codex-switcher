@@ -27,9 +27,18 @@ public struct AccountProfile: Codable, Identifiable, Equatable, Hashable, Sendab
 public struct AccountRegistry: Codable, Equatable, Sendable {
     public var activeAccountID: UUID?
     public var accounts: [AccountProfile]
+    public var removedAccountIdentities: [AccountIdentity]
 
-    public init(activeAccountID: UUID?, accounts: [AccountProfile]) {
+    public init(activeAccountID: UUID?, accounts: [AccountProfile], removedAccountIdentities: [AccountIdentity] = []) {
         self.activeAccountID = activeAccountID; self.accounts = accounts
+        self.removedAccountIdentities = removedAccountIdentities
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        activeAccountID = try container.decodeIfPresent(UUID.self, forKey: .activeAccountID)
+        accounts = try container.decode([AccountProfile].self, forKey: .accounts)
+        removedAccountIdentities = try container.decodeIfPresent([AccountIdentity].self, forKey: .removedAccountIdentities) ?? []
     }
 
     public static let empty = AccountRegistry(activeAccountID: nil, accounts: [])
@@ -177,7 +186,7 @@ public enum UsageViewState: Equatable, Sendable {
     }
 }
 
-public struct AccountIdentity: Equatable, Sendable {
+public struct AccountIdentity: Codable, Equatable, Sendable {
     public let accountID: String?
     public let email: String?
 
@@ -191,16 +200,20 @@ public struct AccountIdentity: Equatable, Sendable {
     }
 
     public func matches(_ profile: AccountProfile) -> Bool {
-        if let expected = profile.accountID, let actual = accountID {
+        matches(AccountIdentity(accountID: profile.accountID, email: profile.email))
+    }
+
+    public func matches(_ identity: AccountIdentity) -> Bool {
+        if let expected = identity.accountID, let actual = accountID {
             guard expected == actual else { return false }
-            if let expectedEmail = profile.email, let actualEmail = email {
+            if let expectedEmail = identity.email, let actualEmail = email {
                 return expectedEmail.caseInsensitiveCompare(actualEmail) == .orderedSame
             }
             return true
         }
         // Known workspace IDs must never merge with an email-only profile.
-        guard profile.accountID == nil, accountID == nil else { return false }
-        if let expected = profile.email, let actual = email {
+        guard identity.accountID == nil, accountID == nil else { return false }
+        if let expected = identity.email, let actual = email {
             return expected.caseInsensitiveCompare(actual) == .orderedSame
         }
         return false

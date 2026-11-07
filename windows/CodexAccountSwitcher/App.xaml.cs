@@ -228,7 +228,7 @@ public partial class App : Application
             ("Muted", dark ? "#ABBBD0" : "#5E6F86"), ("Schedule", dark ? "#CBDDF5" : "#344B6A"), ("Line", dark ? "#31465F" : "#CBD7E8"), ("Track", dark ? "#405169" : "#D6DFEB"),
             ("Hover", dark ? "#263E5B" : "#E2ECFA"),
             ("Success", dark ? "#61DD81" : "#117B38"), ("Warning", dark ? "#F3B94C" : "#9B5C00"), ("WarningSurface", dark ? "#3B3020" : "#FFF4D9"),
-            ("Danger", dark ? "#FF777F" : "#C63943"), ("OnAccent", "#FFFFFF") })
+            ("Danger", dark ? "#FF777F" : "#C63943"), ("DangerSurface", dark ? "#3B202C" : "#FFF0F1"), ("OnAccent", "#FFFFFF") })
             Resources[pair.Item1] = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(pair.Item2));
         ApplyAccent(dark);
         foreach (var plan in new[] { "free", "plus", "pro100", "pro200", "pro500", "team", "business", "enterprise", "edu", "go", "unknown" }) {

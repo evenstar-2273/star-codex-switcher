@@ -67,8 +67,8 @@ public static class AccountImport
         SecureFiles.CreatePrivateDirectory(profilesRoot);
         try {
             foreach (var credential in credentials) {
-                if (credential.AccountID == activeID) { skipped++; continue; }
                 var existing = rows.OfType<JsonObject>().FirstOrDefault(r => r["accountID"]?.GetValue<string>() == credential.AccountID);
+                if (credential.AccountID == activeID && existing != null) { skipped++; continue; }
                 var id = existing != null ? Guid.Parse(existing["id"]!.GetValue<string>()) : Guid.NewGuid();
                 var directory = Path.Combine(profilesRoot, id.ToString().ToUpperInvariant());
                 if (!Directory.Exists(directory)) created.Add(directory);
@@ -84,6 +84,15 @@ public static class AccountImport
                         ["email"] = credential.Email, ["displayName"] = credential.Email,
                         ["createdAt"] = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") });
                     added++;
+                }
+                if (registry["removedAccountIdentities"] is JsonArray removed) {
+                    for (var index = removed.Count - 1; index >= 0; index--) {
+                        var identity = removed[index];
+                        var removedID = identity?["accountID"]?.GetValue<string>();
+                        var removedEmail = identity?["email"]?.GetValue<string>();
+                        if (removedID == credential.AccountID && (removedEmail == null || credential.Email == null ||
+                            string.Equals(removedEmail, credential.Email, StringComparison.OrdinalIgnoreCase))) removed.RemoveAt(index);
+                    }
                 }
             }
             SecureFiles.AtomicWrite(registryPath, Encoding.UTF8.GetBytes(registry.ToJsonString(new JsonSerializerOptions { WriteIndented = true })));
