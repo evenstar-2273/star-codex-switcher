@@ -23,7 +23,18 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
 
     public CoreClient(string hostPath, string dataPath, string? activeHome = null, IDesktopOperations? desktop = null,
         Func<Uri, CancellationToken, Task>? openBrowser = null)
+        : this(hostPath, dataPath, activeHome, desktop, openBrowser, storageRootsResolved: false) { }
+
+    internal CoreClient(string hostPath, string dataPath, string? activeHome, IDesktopOperations? desktop,
+        Func<Uri, CancellationToken, Task>? openBrowser, bool storageRootsResolved)
     {
+        activeHome ??= Environment.GetEnvironmentVariable("CODEX_HOME")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+        if (!storageRootsResolved) {
+            dataPath = SecureFiles.ResolveStorageRoot(dataPath);
+            activeHome = SecureFiles.ResolveStorageRoot(activeHome);
+        }
+        SecureFiles.RejectLinks(dataPath); SecureFiles.RejectLinks(activeHome);
         this.desktop = desktop ?? new DesktopController(ct => DesktopController.DiscoverAsync(null, ct));
         this.openBrowser = openBrowser ?? OpenBrowserAsync;
         context = SynchronizationContext.Current ?? new SynchronizationContext();

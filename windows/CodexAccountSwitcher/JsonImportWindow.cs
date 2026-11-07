@@ -88,7 +88,7 @@ public sealed class JsonImportWindow : Window
                 editor.Clear(); succeeded = true;
             } catch (Exception ex) {
                 status.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
-                status.Text = ex.Message;
+                status.Text = WindowsLocalization.Error(ex.Message, (importer as IAccountClient)?.State.Settings.Language ?? "simplifiedChinese");
             } finally {
                 importing = false; clear.IsEnabled = true; close.IsEnabled = true; file.IsEnabled = true; editor.IsReadOnly = false;
                 submit.IsEnabled = !string.IsNullOrWhiteSpace(editor.Text);

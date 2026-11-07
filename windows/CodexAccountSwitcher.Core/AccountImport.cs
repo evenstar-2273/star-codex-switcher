@@ -47,7 +47,11 @@ public static class AccountImport
 
     // Host must be stopped while changing its registry. The live Codex login is never written here.
     public static ImportResult Commit(string dataHome, string activeHome, LoginCredential[] credentials)
+        => CommitResolved(SecureFiles.ResolveStorageRoot(dataHome), SecureFiles.ResolveStorageRoot(activeHome), credentials);
+
+    internal static ImportResult CommitResolved(string dataHome, string activeHome, LoginCredential[] credentials)
     {
+        SecureFiles.RejectLinks(dataHome); SecureFiles.RejectLinks(activeHome);
         SecureFiles.CreatePrivateDirectory(dataHome);
         var registryPath = Path.Combine(dataHome, "accounts.json");
         SecureFiles.RejectLinks(registryPath);

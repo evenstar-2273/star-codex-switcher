@@ -17,6 +17,15 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length >= 1 && args[0] == "--test-language") {
+            try {
+                var target = Path.GetFullPath(args.ElementAtOrDefault(1) ?? "windows/artifacts/language");
+                Directory.CreateDirectory(target);
+                var fixtureApp = new App(false); fixtureApp.InitializeComponent(); fixtureApp.ApplyPalette(false);
+                LanguageChecks.Run(new NativeSettings(@"Software\StarCodexSwitcher.UiChecks\Language-" + Guid.NewGuid().ToString("N")), target);
+                return 0;
+            } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
         if (args.Length >= 1 && args[0] == "--test-quota-refresh") {
             try {
                 var app = new App(false); app.InitializeComponent(); app.ApplyPalette(false);

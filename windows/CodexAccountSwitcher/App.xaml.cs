@@ -66,24 +66,47 @@ public partial class App : Application
         catch { Shutdown(1); return; }
         if (e.Args.Contains("--self-test")) { await SelfTestAsync(); return; }
         try {
-            var dataPath = Environment.GetEnvironmentVariable("CODEX_SWITCHER_DATA_HOME")
+            var configuredDataPath = Environment.GetEnvironmentVariable("CODEX_SWITCHER_DATA_HOME")
                 ?? DefaultDataDirectory;
+            var preparingInstall = e.Args.Contains("--prepare-install");
+            string dataPath;
+            try { dataPath = SecureFiles.ResolveStorageRoot(configuredDataPath); }
+            catch (IOException) when (preparingInstall) {
+                // A broken directory must not prevent the installer from asking
+                // an older instance, keyed by the alias, to exit safely.
+                dataPath = Path.GetFullPath(configuredDataPath);
+            }
             var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(dataPath).ToUpperInvariant())));
-            if (e.Args.Contains("--prepare-install")) {
+            var legacyKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(configuredDataPath).ToUpperInvariant())));
+            if (preparingInstall) {
                 // Installer may ask the running switcher to exit, but never interrupts account work.
-                var mutexName = @"Local\CodexAccountSwitcher-" + key;
-                try {
-                    using var running = Mutex.OpenExisting(mutexName);
-                    try { using var quit = EventWaitHandle.OpenExisting(@"Local\CodexAccountSwitcher-InstallQuit-" + key); quit.Set(); }
-                    catch (WaitHandleCannotBeOpenedException) { Shutdown(10); return; }
-                    var released = false;
-                    for (var i = 0; i < 100; i++) {
-                        try { if (running.WaitOne(0)) { running.ReleaseMutex(); released = true; break; } }
-                        catch (AbandonedMutexException) { running.ReleaseMutex(); released = true; break; }
-                        await Task.Delay(100);
+                // Older versions keyed IPC by the configured alias. An update must
+                // still ask that instance to exit after roots become canonical.
+                foreach (var instanceKey in new[] { key, legacyKey }.Distinct()) {
+                    try {
+                        using var running = Mutex.OpenExisting(@"Local\CodexAccountSwitcher-" + instanceKey);
+                        try { using var quit = EventWaitHandle.OpenExisting(@"Local\CodexAccountSwitcher-InstallQuit-" + instanceKey); quit.Set(); }
+                        catch (WaitHandleCannotBeOpenedException) { Shutdown(10); return; }
+                        var released = false;
+                        for (var i = 0; i < 100; i++) {
+                            try { if (running.WaitOne(0)) { running.ReleaseMutex(); released = true; break; } }
+                            catch (AbandonedMutexException) { running.ReleaseMutex(); released = true; break; }
+                            await Task.Delay(100);
+                        }
+                        if (!released) { Shutdown(10); return; }
                     }
-                    Shutdown(released ? 0 : 10); return;
-                } catch (WaitHandleCannotBeOpenedException) { Shutdown(0); return; }
+                    catch (WaitHandleCannotBeOpenedException) { }
+                }
+                Shutdown(); return;
+            }
+            if (legacyKey != key) {
+                try {
+                    using var legacy = Mutex.OpenExisting(@"Local\CodexAccountSwitcher-" + legacyKey);
+                    try { using var activate = EventWaitHandle.OpenExisting(@"Local\CodexAccountSwitcher-Activate-" + legacyKey); activate.Set(); }
+                    catch (WaitHandleCannotBeOpenedException) { }
+                    Shutdown(); return;
+                }
+                catch (WaitHandleCannotBeOpenedException) { }
             }
             instance = new Mutex(true, @"Local\CodexAccountSwitcher-" + key, out ownsMutex);
             activateWindow = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\CodexAccountSwitcher-Activate-" + key);
@@ -123,7 +146,7 @@ public partial class App : Application
             updates.Start();
             if (native.AutomaticallyCheckUpdates && native.HasUpdateServer) _ = native.CheckUpdatesAsync();
         } catch (Exception ex) {
-            MessageBox.Show(ex.Message, DisplayName, MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(WindowsLocalization.Error(ex.Message, client?.State.Settings.Language ?? "simplifiedChinese"), DisplayName, MessageBoxButton.OK, MessageBoxImage.Error);
             await QuitAsync();
         }
     }

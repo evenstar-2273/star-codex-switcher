@@ -14,7 +14,7 @@ public static class HostRuntime
             ?? throw new FileNotFoundException("The shared Swift runtime is missing. Build with scripts/package-windows.ps1.");
         using var payload = new MemoryStream(); resource.CopyTo(payload);
         var digest = Convert.ToHexString(SHA256.HashData(payload.ToArray())); payload.Position = 0;
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Codex Account Switcher Runtime");
+        var root = SecureFiles.ResolveStorageRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Codex Account Switcher Runtime"));
         SecureFiles.CreatePrivateDirectory(root);
         var destination = Path.Combine(root, digest); SecureFiles.CreatePrivateDirectory(destination);
         using var archive = new ZipArchive(payload, ZipArchiveMode.Read);

@@ -42,6 +42,8 @@ public static class WindowsLocalization
             "读取额度失败，请检查网络后重试。" => "Quota refresh failed. Check your network and retry.",
             _ => message
         };
+        var storageError = PrivateStorageError(message);
+        if (storageError != null) return storageError;
         var translated = message switch {
             "Codex did not return an account identity." => "无法读取 Codex 账号身份，请确认已完成登录，或重新导入有效的账号凭据。",
             "The account profile could not be found." => "找不到该账号的本地记录。",
@@ -71,6 +73,12 @@ public static class WindowsLocalization
             "Codex Desktop did not start within 15 seconds. Open it manually; the selected account remains active." => "Codex 桌面版未能在 15 秒内启动；所选账号已生效，请手动打开 Codex。",
             "Codex Desktop is running without a closable window. Quit it manually before switching." => "Codex 桌面版仍在后台运行，请手动退出后再切换账号。",
             "Switch was not validated." => "账号切换尚未通过验证。",
+            "Windows user identity is unavailable." => "无法确认当前 Windows 用户身份，暂时无法访问账号存储。",
+            "Account storage cannot use symbolic links or junctions." => "账号存储路径包含目录链接或联接，暂时无法访问。请检查账号数据目录的链接或重定向设置。",
+            "Cleanup path is outside account storage." => "清理目标超出账号数据目录，已停止清理。",
+            "The account storage directory is empty." => "账号数据目录不能为空。",
+            "The account storage root must be a directory." => "账号数据存储位置必须是文件夹，请检查数据目录路径。",
+            "Choose a dedicated account storage folder, not a drive or Windows user folder." => "请使用独立的账号数据文件夹，不能直接使用系统、用户或磁盘根目录。",
             _ => null
         };
         if (translated != null) return translated;
@@ -80,5 +88,28 @@ public static class WindowsLocalization
                 return prefix.Chinese + message[prefix.English.Length..];
         }
         return message;
+    }
+
+    private static string? PrivateStorageError(string message)
+    {
+        const string accessPrefix = "Windows could not access private account storage (error ";
+        const string resolvePrefix = "The account storage directory could not be resolved (Windows error ";
+        const string suffix = ").";
+        var resolving = message.StartsWith(resolvePrefix, StringComparison.Ordinal);
+        var prefix = resolving ? resolvePrefix : accessPrefix;
+        if (!message.StartsWith(prefix, StringComparison.Ordinal) || !message.EndsWith(suffix, StringComparison.Ordinal)
+            || message.Length <= prefix.Length + suffix.Length
+            || !uint.TryParse(message.AsSpan(prefix.Length, message.Length - prefix.Length - suffix.Length),
+                NumberStyles.None, CultureInfo.InvariantCulture, out var code)) return null;
+        var reason = code switch {
+            4393 => "请检查账号数据目录的链接或重定向设置。",
+            2 or 3 => "找不到账号数据目录或其链接目标，请检查目录位置。",
+            5 => "请检查当前 Windows 用户对账号数据目录的访问权限。",
+            32 or 33 => "账号数据文件正被其他程序占用，请关闭占用程序后重试。",
+            1921 => "系统无法访问账号数据目录的链接目标，请检查是否存在无效或循环链接。",
+            _ => "请检查账号数据目录是否可访问后重试。"
+        };
+        return (resolving ? "Windows 无法确定账号存储目录的实际位置（错误 " : "Windows 无法访问账号存储（错误 ")
+            + code.ToString(CultureInfo.InvariantCulture) + "）。" + reason;
     }
 }

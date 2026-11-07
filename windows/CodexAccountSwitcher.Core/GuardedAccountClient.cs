@@ -229,16 +229,16 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         IResetCreditService? resetCredits = null, Func<LoginCredential, CancellationToken, Task<Usage>>? usageReader = null,
         ISubscriptionReader? subscriptionReader = null)
     {
-        this.dataPath = dataPath;
+        this.dataPath = SecureFiles.ResolveStorageRoot(dataPath);
         this.desktop = desktop ?? new DesktopController(ct => DesktopController.DiscoverAsync(null, ct));
         this.validator = validator ?? new OnlineLoginValidator();
         directUsageEnabled = validator == null || resetCredits != null || usageReader != null || subscriptionReader != null;
         this.resetCredits = resetCredits ?? new OfficialResetCredits(); ownsResetCredits = resetCredits == null;
         this.usageReader = usageReader ?? ReadOfficialUsageAsync;
         this.subscriptionReader = subscriptionReader ?? new OfficialSubscriptionReader(); ownsSubscriptionReader = subscriptionReader == null;
-        this.activeHome = activeHome ?? Environment.GetEnvironmentVariable("CODEX_HOME")
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
-        runtimeFactory = () => new HostedRuntime(new CoreClient(hostPath, dataPath, this.activeHome, this));
+        this.activeHome = SecureFiles.ResolveStorageRoot(activeHome ?? Environment.GetEnvironmentVariable("CODEX_HOME")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"));
+        runtimeFactory = () => new HostedRuntime(new CoreClient(hostPath, this.dataPath, this.activeHome, this, null, storageRootsResolved: true));
     }
 
     internal GuardedAccountClient(string dataPath, string activeHome, Func<IAccountRuntime> runtimeFactory,
@@ -406,7 +406,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             var credentials = parse(); // Fully parse before stopping or writing anything. Pasted text is never saved to a temporary file.
             AdvanceUsageGeneration(clear: true);
             await StopCoreAsync();
-            try { return AccountImport.Commit(dataPath, activeHome, credentials); }
+            try { return AccountImport.CommitResolved(dataPath, activeHome, credentials); }
             finally { await InitializeAsync(); }
         } finally { busy = false; commands.Release(); Notify(); }
     }

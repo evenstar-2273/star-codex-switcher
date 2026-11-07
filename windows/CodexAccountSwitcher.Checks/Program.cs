@@ -14,6 +14,7 @@ if (args.FirstOrDefault() == "login-cancel") return await LoginCancellationCheck
 if (args.FirstOrDefault() == "quota-refresh") return await QuotaRefreshChecks.RunAsync(args.ElementAtOrDefault(1));
 if (args.FirstOrDefault() == "quota-settings") return await QuotaRefreshChecks.RunSettingsAsync(args.ElementAtOrDefault(1));
 if (args.FirstOrDefault() == "quota-network") return await QuotaNetworkChecks.RunAsync();
+if (args.FirstOrDefault() == "storage-paths") return await StoragePathChecks.RunAsync(args.ElementAtOrDefault(1));
 
 if (args.FirstOrDefault() == "desktop-close") {
     var fixture = args.ElementAtOrDefault(1);

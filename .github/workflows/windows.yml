@@ -49,6 +49,8 @@ jobs:
       - name: Check guarded login, import and recovery
         shell: pwsh
         run: |
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- storage-paths ./windows/artifacts/installer-runtime/SwitcherHost.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Storage directory compatibility checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- guarded ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Guarded checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- plans
