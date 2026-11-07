@@ -5,13 +5,17 @@ import Testing
 @MainActor
 struct AccountCancellationTests {
     @Test func cancelledShutdownWaitStillObservesProcessExit() async throws {
-        let barrier = ProcessExitBarrier()
+        let deadlines = ControlledExitDeadlines()
+        let barrier = ProcessExitBarrier { _, operation in deadlines.schedule(operation) }
         let waiter = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             return await barrier.wait(timeout: 1)
         }
-        try await Task.sleep(for: .milliseconds(30))
+        // Wait for registration, not for a short sleep to win a race against
+        // Dispatch while other MainActor tests perform filesystem operations.
+        await deadlines.waitForScheduled(1)
         barrier.markExited()
+        deadlines.expireAll()
         #expect(await waiter.value)
         // Repeated stop callers share the already-observed exit, even after cancellation.
         barrier.markExited()
@@ -26,11 +30,14 @@ struct AccountCancellationTests {
     }
 
     @Test func concurrentShutdownWaitersObserveTheSameExit() async throws {
-        let barrier = ProcessExitBarrier()
+        let deadlines = ControlledExitDeadlines()
+        let barrier = ProcessExitBarrier { _, operation in deadlines.schedule(operation) }
         async let first = barrier.wait(timeout: 1)
         async let second = barrier.wait(timeout: 1)
-        try await Task.sleep(for: .milliseconds(20))
+        await deadlines.waitForScheduled(2)
         barrier.markExited()
+        // Late timeout callbacks must not complete either continuation again.
+        deadlines.expireAll()
         let results = await (first, second)
         #expect(results.0)
         #expect(results.1)
@@ -278,6 +285,42 @@ struct AccountCancellationTests {
                 continuation.resume()
             }
         }
+    }
+}
+
+private final class ControlledExitDeadlines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var operations: [@Sendable () -> Void] = []
+    private var registrationWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    func schedule(_ operation: @escaping @Sendable () -> Void) {
+        lock.lock()
+        operations.append(operation)
+        let ready = registrationWaiters.filter { $0.0 <= operations.count }
+        registrationWaiters.removeAll { $0.0 <= operations.count }
+        lock.unlock()
+        ready.forEach { $0.1.resume() }
+    }
+
+    func waitForScheduled(_ count: Int) async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if operations.count >= count {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                registrationWaiters.append((count, continuation))
+                lock.unlock()
+            }
+        }
+    }
+
+    func expireAll() {
+        lock.lock()
+        let pending = operations
+        operations.removeAll()
+        lock.unlock()
+        pending.forEach { $0() }
     }
 }
 

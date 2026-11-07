@@ -201,9 +201,18 @@ private final class StderrDrain: @unchecked Sendable {
 /// Process shutdown must finish even when the caller is already cancelled.
 /// The timeout uses Dispatch rather than a cancellable task sleep.
 final class ProcessExitBarrier: @unchecked Sendable {
+    typealias TimeoutScheduler = @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void
+
     private let lock = NSLock()
+    private let scheduleTimeout: TimeoutScheduler
     private var exited = false
     private var waiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
+
+    init(scheduleTimeout: @escaping TimeoutScheduler = { timeout, operation in
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: operation)
+    }) {
+        self.scheduleTimeout = scheduleTimeout
+    }
 
     func markExited() {
         lock.lock()
@@ -225,7 +234,7 @@ final class ProcessExitBarrier: @unchecked Sendable {
             }
             waiters[id] = continuation
             lock.unlock()
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [self] in
+            scheduleTimeout(timeout) { [self] in
                 lock.lock()
                 let pending = waiters.removeValue(forKey: id)
                 lock.unlock()
