@@ -84,6 +84,7 @@ public static class WindowsLocalization
             QuotaReadException.ProxyTimeout => "The quota request through the proxy timed out. Check the proxy or try another node.",
             QuotaReadException.ProxyAuthentication => "Proxy authentication failed (407). Check the proxy username and password.",
             QuotaReadException.Unauthorized => "Sign-in credentials have expired (401). Sign in again or import valid credentials.",
+            QuotaReadException.AuthorizationRevoked => "Codex sign-in authorization was revoked by the server and cannot be refreshed automatically. Sign in to the Codex account again.",
             QuotaReadException.Forbidden => "The quota request was denied (403). Check your network route or account permissions.",
             QuotaReadException.RateLimited => "Too many requests (429). Wait before refreshing again.",
             QuotaReadException.ServiceUnavailable => "The quota service is temporarily unavailable. Try again later.",
@@ -91,12 +92,13 @@ public static class WindowsLocalization
             QuotaReadException.MissingWindow => "The service has not returned a recognized quota window. Refresh again later.",
             QuotaReadException.RequestFailed => "The quota request failed. Try again later.",
             "读取额度失败，请检查网络后重试。" => "Quota refresh failed. Check your network and retry.",
-            "该账号登录已失效，请先恢复登录后再切换。" => "This account's sign-in has expired. Restore sign-in before switching.",
+            "该账号登录已失效，请先恢复登录后再切换。" or "该账号登录已失效，请先重新授权后再切换。" => "This account's sign-in has expired. Reauthorize the account before switching.",
             _ => Redact(message)
         };
         var storageError = PrivateStorageError(message);
         if (storageError != null) return storageError;
         var translated = message switch {
+            "该账号登录已失效，请先恢复登录后再切换。" => "该账号登录已失效，请先重新授权后再切换。",
             "Codex did not return an account identity." => "无法读取 Codex 账号身份，请确认已完成登录，或重新导入有效的账号凭据。",
             "The account profile could not be found." => "找不到该账号的本地记录。",
             "No active account profile is configured." => "尚未设置当前账号。",

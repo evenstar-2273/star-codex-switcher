@@ -14,7 +14,8 @@ public sealed class QuotaReadException(string message) : IOException(message)
     public const string ProxyTimeout = "通过代理连接额度服务超时，请检查代理或更换节点后重试。";
     public const string ProxyAuthentication = "代理认证失败（407），请检查代理用户名或密码。";
     public const string Unauthorized = "登录凭据已失效（401），请重新授权或导入有效凭据。";
-    public static bool IsAuthenticationFailure(string? message) => message == Unauthorized;
+    public const string AuthorizationRevoked = "Codex 登录授权已被服务端撤销，无法自动刷新。请重新登录 Codex 账号。";
+    public static bool IsAuthenticationFailure(string? message) => message is Unauthorized or AuthorizationRevoked;
     public const string Forbidden = "额度请求被拒绝（403），请检查网络出口或账号权限。";
     public const string RateLimited = "请求过于频繁（429），请稍后刷新。";
     public const string ServiceUnavailable = "额度服务暂时不可用，请稍后重试。";

@@ -25,6 +25,7 @@ public static class WindowsHttp
 
 public sealed class OfficialUsageReader : IDisposable
 {
+    private const int MaximumErrorBytes = 16 * 1024;
     private readonly HttpClient http;
     private readonly Uri? proxyEndpoint;
     public OfficialUsageReader(HttpMessageHandler? handler = null, Uri? proxyEndpoint = null)
@@ -39,10 +40,18 @@ public sealed class OfficialUsageReader : IDisposable
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential.AccessToken);
         request.Headers.Add("ChatGPT-Account-Id", credential.AccountID);
         request.Headers.Accept.ParseAdd("application/json");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(20));
         try {
-            using var response = await http.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode) throw QuotaReadException.FromStatus(response.StatusCode);
-            var body = await response.Content.ReadAsStringAsync(ct);
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            if (!response.IsSuccessStatusCode) {
+                if (response.StatusCode == HttpStatusCode.Unauthorized &&
+                    await HasRevokedAuthorizationAsync(response.Content, deadline.Token, ct))
+                    throw new QuotaReadException(QuotaReadException.AuthorizationRevoked);
+                throw QuotaReadException.FromStatus(response.StatusCode);
+            }
+            await response.Content.LoadIntoBufferAsync(1024 * 1024, deadline.Token);
+            var body = await response.Content.ReadAsStringAsync(deadline.Token);
             try { return Parse(body, DateTimeOffset.UtcNow); }
             catch (JsonException) { throw new QuotaReadException(QuotaReadException.InvalidResponse); }
             catch (IOException) { throw new QuotaReadException(QuotaReadException.MissingWindow); }
@@ -55,6 +64,70 @@ public sealed class OfficialUsageReader : IDisposable
             throw QuotaReadException.FromTransport(error, proxyEndpoint);
         }
     }
+
+    private static async Task<bool> HasRevokedAuthorizationAsync(HttpContent content, CancellationToken deadline, CancellationToken caller)
+    {
+        // Never expose server messages or buffer an unbounded error response. A
+        // broken error body does not change the already confirmed HTTP 401.
+        try {
+            caller.ThrowIfCancellationRequested();
+            if (content.Headers.ContentLength > MaximumErrorBytes) return false;
+            using var stream = await content.ReadAsStreamAsync(deadline);
+            var bytes = new byte[MaximumErrorBytes + 1];
+            var count = 0;
+            while (count < bytes.Length) {
+                var read = await stream.ReadAsync(bytes.AsMemory(count), deadline);
+                if (read == 0) break;
+                count += read;
+            }
+            if (count > MaximumErrorBytes) return false;
+            using var document = JsonDocument.Parse(bytes.AsMemory(0, count), new JsonDocumentOptions { MaxDepth = 16 });
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return false;
+            root.TryGetProperty("error", out var error);
+            if (HasErrorCode(root, IsRevokedCode) || HasErrorCode(error, IsRevokedCode)) return true;
+            // Structured expiry/reuse codes take priority over incidental text
+            // in either envelope, so a generic 401 is not labeled revoked.
+            if (HasErrorCode(root, IsOtherAuthenticationCode) || HasErrorCode(error, IsOtherAuthenticationCode)) return false;
+            return HasRevocationMessage(root) || HasRevocationMessage(error);
+        } catch (OperationCanceledException) when (!caller.IsCancellationRequested) {
+            return false;
+        } catch (Exception error) when (error is JsonException or IOException or HttpRequestException) {
+            caller.ThrowIfCancellationRequested();
+            return false;
+        }
+    }
+
+    private static bool HasErrorCode(JsonElement error, Func<string?, bool> matches)
+    {
+        if (error.ValueKind == JsonValueKind.String) return matches(error.GetString());
+        if (error.ValueKind != JsonValueKind.Object) return false;
+        foreach (var name in new[] { "code", "type", "error_code" })
+            if (error.TryGetProperty(name, out var code) && code.ValueKind == JsonValueKind.String && matches(code.GetString()))
+                return true;
+        return false;
+    }
+
+    private static bool HasRevocationMessage(JsonElement error)
+    {
+        if (error.ValueKind != JsonValueKind.Object) return false;
+        if (!error.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.String) return false;
+        var text = message.GetString()!;
+        return text.Contains("authentication token has been invalidated", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("authentication token has been revoked", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("refresh token has been invalidated", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("refresh token has been revoked", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("access token has been invalidated", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("access token has been revoked", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRevokedCode(string? code) => code?.Trim().ToLowerInvariant() is
+        "refresh_token_invalidated" or "token_invalidated" or "token_revoked";
+
+    private static bool IsOtherAuthenticationCode(string? code) => code?.Trim().ToLowerInvariant() is
+        "refresh_token_reused" or "token_reused" or "refresh_token_expired" or "token_expired" or
+        "expired_token" or "invalid_grant" or "invalid_refresh_token";
+
     public static Usage Parse(string json, DateTimeOffset now)
     {
         using var document = JsonDocument.Parse(json);

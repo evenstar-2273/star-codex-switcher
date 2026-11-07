@@ -350,7 +350,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             if (accountID == null || core.State.IsMutating || core.State.IsAddingAccount) return;
             DetectChangedCredentials();
             if (QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(row => row.Profile.Id == accountID)?.UsageError)) {
-                error = "该账号登录已失效，请先恢复登录后再切换。";
+                error = "该账号登录已失效，请先重新授权后再切换。";
                 return;
             }
             busy = true; error = null; AdvanceUsageGeneration(clear: true); Notify();

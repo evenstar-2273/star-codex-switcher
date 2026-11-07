@@ -202,22 +202,33 @@ internal static class RefreshResetChecks
         foreach (var dark in new[] { false, true }) {
             native.ThemePreference = dark ? "dark" : "light";
             client.Publish(saved with { Accounts = saved.Accounts.Select((row, index) => row with {
-                UsageError = index == 0 ? QuotaReadException.Unauthorized : index == 1 ? QuotaReadException.ProxyTimeout : null
+                UsageError = index == 0 ? QuotaReadException.AuthorizationRevoked : index == 1 ? QuotaReadException.ProxyTimeout : null
             }).ToArray() }); window.Navigate("accounts"); window.Width = 1150; window.Height = 850; Pump(50);
             var cards = Cards(window); var expired = cards[0]; var network = cards[1];
-            var title = All<TextBlock>(expired).Single(text => text.Text == "登录已失效");
+            var title = All<TextBlock>(expired).Single(text => Name(text) == "额度刷新失败原因");
             var alert = All<Border>(expired).Single(border => Name(border) == "登录失效提示");
-            Check(title.FontSize >= 16 && title.FontWeight.ToOpenTypeWeight() >= FontWeights.SemiBold.ToOpenTypeWeight() && Equals(title.Foreground, app.Resources["Danger"]) && Equals(alert.Background, app.Resources["DangerSurface"]),
-                "401 uses a prominent red title and dedicated tinted alert in both themes.");
-            Check(All<TextBlock>(expired).Any(text => text.Text.Contains("显示上次额度")) && !window.IsBusy && !Icon(Button(expired, "刷新此账号")).RenderTransform.HasAnimatedProperties,
+            Check(title.FontSize >= 13 && title.FontWeight.ToOpenTypeWeight() >= FontWeights.SemiBold.ToOpenTypeWeight() && Equals(title.Foreground, app.Resources["Danger"]) && Equals(alert.Background, app.Resources["DangerSurface"]) &&
+                title.Text.Contains("被服务端撤销") && Equals(title.ToolTip, QuotaReadException.AuthorizationRevoked) && alert.ActualHeight <= 56,
+                "Confirmed revocation uses a compact red summary with the full reason available in both themes.");
+            Check(All<System.Windows.Shapes.Path>(alert).Count() == 1 && !All<TextBlock>(alert).Any(text => text.Text == "\uE72E"),
+                "The compact alert uses a vector status icon, without misleading lock glyphs.");
+            Check(All<TextBlock>(expired).Any(text => text.Text == "上次额度") && !window.IsBusy && !Icon(Button(expired, "刷新此账号")).RenderTransform.HasAnimatedProperties,
                 "A persistent authentication alert identifies cached quota without showing a timer spinner or blocking the page.");
             var switchExpired = Button(expired, client.State.Accounts[0].Profile.Email!);
-            Check(!switchExpired.IsEnabled && Button(expired, "恢复登录").IsEnabled, "Expired sign-in disables switching and exposes the recovery action.");
+            Check(!switchExpired.IsEnabled && Button(expired, "重新授权").IsEnabled, "Expired sign-in disables switching and exposes the recovery action.");
             var calls = client.OtherCalls; Click(switchExpired); Pump(20);
             Check(window.CurrentPage == "accounts" && client.OtherCalls == calls, "Even a stale disabled switch callback cannot open a confirmation for a known expired login.");
             Check(!All<TextBlock>(network).Any(text => text.Text == "登录已失效") && Equals(All<Border>(network).Single(border => Name(border) == "刷新失败提示").Background, app.Resources["WarningSurface"]) && Button(network, client.State.Accounts[1].Profile.Email!).IsEnabled,
                 "A VPN/proxy timeout uses an amber refresh warning and is not treated as expired authentication.");
             Capture(window, Path.Combine(output, $"account-auth-status-{(dark ? "dark" : "light")}.png"));
+            window.Width = 480; Pump(40);
+            var narrowAlert = All<Border>(Cards(window)[0]).Single(border => Name(border) == "登录失效提示");
+            var narrowButton = Button(narrowAlert, "重新授权");
+            Check(narrowAlert.ActualHeight <= 56 && narrowButton.IsEnabled &&
+                narrowButton.TransformToAncestor(narrowAlert).Transform(new Point(0, 0)).X + narrowButton.ActualWidth <= narrowAlert.ActualWidth,
+                "At minimum window width the two-line warning stays compact and the authorization action remains fully visible.");
+            Capture(window, Path.Combine(output, $"account-auth-compact-narrow-{(dark ? "dark" : "light")}.png"));
+            window.Width = 1150; Pump(40); expired = Cards(window)[0];
             Exception? dialogFailure = null;
             var recoveryTarget = client.State.Accounts[0].Profile.Id;
             var addCalls = client.AddCalls.Count;
@@ -231,7 +242,7 @@ internal static class RefreshResetChecks
                     Click(Button(dialog, "浏览器授权"));
                 } catch (Exception ex) { dialogFailure = ex; } finally { if (dialog.IsVisible) dialog.Close(); }
             }));
-            Click(Button(expired, "恢复登录")); if (dialogFailure != null) throw dialogFailure;
+            Click(Button(expired, "重新授权")); if (dialogFailure != null) throw dialogFailure;
             Check(client.AddCalls.Count == addCalls + 1 && client.AddCalls[^1] == recoveryTarget,
                 "Browser recovery submits exactly one add command bound to the selected expired account ID.");
             Click(Button(Cards(window)[1], client.State.Accounts[1].Profile.Email!)); Pump(20);

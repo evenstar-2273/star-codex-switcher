@@ -28,7 +28,7 @@
 ## 安装与使用
 
 1. 安装并运行过 Codex Desktop，确认本机能够连接其服务。
-2. 使用上方 GitHub 固定直链下载 `Star-Codex-Switcher-Setup-x64.exe`，双击安装；该地址始终提供最新正式版。需要指定版本时，可到 [Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 下载带版本号的安装包，例如 `Star-Codex-Switcher-1.0.9-Setup-x64.exe`。升级时运行安装包即可，保留已有账号和设置；不要把安装包作为主程序文件替换。
+2. 使用上方 GitHub 固定直链下载 `Star-Codex-Switcher-Setup-x64.exe`，双击安装；该地址始终提供最新正式版。需要指定版本时，可到 [Releases](https://github.com/evenstar-2273/star-codex-switcher/releases) 下载带版本号的安装包，例如 `Star-Codex-Switcher-1.0.10-Setup-x64.exe`。升级时运行安装包即可，保留已有账号和设置；不要把安装包作为主程序文件替换。
 3. 打开工具，点击“添加账号”选择获取本地账号 / 浏览器授权 / JSON 导入。取消授权后，工具会结束本次登录并恢复操作；无需退出当前账号。切换前先完成或停止 Codex Desktop 内正在运行的任务。
 4. 点击账号的“切换”，核对二次确认提示后继续。切换流程可能关闭并重启 Codex Desktop。
 

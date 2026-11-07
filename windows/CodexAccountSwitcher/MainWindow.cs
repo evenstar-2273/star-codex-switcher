@@ -369,9 +369,10 @@ public sealed class MainWindow : Window
         card.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         card.Children.Add(AccountHeader(row, active));
         var quotas = new StackPanel { Margin = new Thickness(0, 14, 0, 8), VerticalAlignment = VerticalAlignment.Center };
+        var cachedQuota = !string.IsNullOrWhiteSpace(row.UsageError);
         if (row.Usage is { } usage) {
-            if (usage.FiveHourRemainingPercent.HasValue) quotas.Children.Add(UsageLine(L("5 小时剩余", "5 hours left"), usage.FiveHourRemainingPercent, usage.FiveHourResetsAt, false));
-            quotas.Children.Add(UsageLine(L("7 天剩余", "7 days left"), usage.RemainingPercent, usage.ResetsAt, true));
+            if (usage.FiveHourRemainingPercent.HasValue) quotas.Children.Add(UsageLine(L("5 小时剩余", "5 hours left"), usage.FiveHourRemainingPercent, usage.FiveHourResetsAt, false, cachedQuota));
+            quotas.Children.Add(UsageLine(L("7 天剩余", "7 days left"), usage.RemainingPercent, usage.ResetsAt, true, cachedQuota));
         } else {
             var missing = Text(row.UsageStatus == "idle" && string.IsNullOrWhiteSpace(row.UsageError) ? L("额度读取中…", "Loading quota…") : T("usage_unavailable"), 15, muted: true);
             missing.ToolTip = WindowsLocalization.Error(row.UsageError, State.Settings.Language); missing.TextWrapping = TextWrapping.Wrap; quotas.Children.Add(missing);
@@ -379,23 +380,32 @@ public sealed class MainWindow : Window
         if (!string.IsNullOrWhiteSpace(row.UsageError)) {
             var expiredLogin = QuotaReadException.IsAuthenticationFailure(row.UsageError);
             var tone = expiredLogin ? "Danger" : "Warning";
-            var warning = new StackPanel { Margin = new Thickness(12) };
-            var heading = new StackPanel { Orientation = Orientation.Horizontal };
-            var symbol = IconText(expiredLogin ? "\uE72E" : "\uE7BA", 18); symbol.Margin = new Thickness(0, 0, 8, 0); symbol.SetResourceReference(TextBlock.ForegroundProperty, tone); heading.Children.Add(symbol);
-            var failure = Text(expiredLogin ? L("登录已失效", "Sign-in expired") : L("刷新失败", "Refresh failed"), 16, bold: true);
-            failure.SetResourceReference(TextBlock.ForegroundProperty, tone); failure.TextWrapping = TextWrapping.Wrap;
-            failure.TextTrimming = TextTrimming.None; heading.Children.Add(failure); warning.Children.Add(heading);
-            var reason = Text(WindowsLocalization.Error(row.UsageError, State.Settings.Language), 14);
-            reason.ToolTip = WindowsLocalization.TechnicalDetails(row.UsageError, State.Settings.Language);
-            reason.TextWrapping = TextWrapping.Wrap; reason.TextTrimming = TextTrimming.None; reason.Margin = new Thickness(0, 4, 0, 0);
-            AutomationProperties.SetName(reason, L("额度刷新失败原因", "Quota refresh error")); warning.Children.Add(reason);
-            if (row.Usage != null) {
-                var cached = Text(L("显示上次额度，仅供参考", "Showing the last known quota for reference"), 13, muted: true);
-                cached.TextWrapping = TextWrapping.Wrap; cached.Margin = new Thickness(0, 6, 0, 0); warning.Children.Add(cached);
-            }
+            var warning = new Grid { Margin = new Thickness(10, 8, 10, 8) };
+            warning.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            warning.ColumnDefinitions.Add(new ColumnDefinition());
+            warning.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var symbol = new System.Windows.Shapes.Path {
+                Data = Geometry.Parse("M8,1 A7,7 0 1 1 7.999,1 M8,4 L8,8 M8,11 L8,11.1"),
+                Width = 16, Height = 16, StrokeThickness = 1.5, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round,
+                Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center
+            };
+            symbol.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, tone); warning.Children.Add(symbol);
+            var fullReason = WindowsLocalization.Error(row.UsageError, State.Settings.Language);
+            var summary = row.UsageError == QuotaReadException.AuthorizationRevoked
+                ? L("登录授权已被服务端撤销，无法自动刷新。", "Sign-in authorization was revoked by the server and cannot refresh automatically.")
+                : expiredLogin ? L("登录授权已失效，请重新授权。", "Sign-in authorization is no longer valid. Authorize again.") : fullReason;
+            var reason = Text(summary, 13, bold: expiredLogin);
+            reason.SetResourceReference(TextBlock.ForegroundProperty, tone);
+            reason.ToolTip = fullReason; reason.TextWrapping = TextWrapping.Wrap; reason.LineHeight = 18;
+            reason.LineStackingStrategy = LineStackingStrategy.BlockLineHeight; reason.MaxHeight = 36;
+            AutomationProperties.SetName(reason, L("额度刷新失败原因", "Quota refresh error"));
+            AutomationProperties.SetHelpText(reason, fullReason); Grid.SetColumn(reason, 1); warning.Children.Add(reason);
             if (expiredLogin) {
-                var authorize = Button(L("恢复登录", "Restore sign-in"), () => OpenAddAccount(true, row.Profile.Id), "\uE72E"); authorize.Margin = new Thickness(0, 10, 0, 0); authorize.HorizontalAlignment = HorizontalAlignment.Left;
-                authorize.IsEnabled &= !State.IsAddingAccount; warning.Children.Add(authorize);
+                var authorize = Button(L("重新授权", "Authorize again"), () => OpenAddAccount(true, row.Profile.Id));
+                authorize.Padding = new Thickness(8, 4, 8, 4); authorize.MinHeight = 28;
+                foreach (var label in ((StackPanel)authorize.Content).Children.OfType<TextBlock>()) label.FontSize = 13;
+                authorize.Margin = new Thickness(10, 0, 0, 0); authorize.VerticalAlignment = VerticalAlignment.Center;
+                authorize.IsEnabled &= !State.IsAddingAccount; Grid.SetColumn(authorize, 2); warning.Children.Add(authorize);
             }
             var alert = Box(warning, expiredLogin ? "DangerSurface" : "WarningSurface", 9);
             alert.SetResourceReference(Border.BorderBrushProperty, tone); alert.Margin = new Thickness(0, 8, 0, 4);
@@ -440,7 +450,7 @@ public sealed class MainWindow : Window
         var authenticationFailed = QuotaReadException.IsAuthenticationFailure(row.UsageError);
         change.MinWidth = 86; change.IsEnabled &= !active && !State.IsAddingAccount && !authenticationFailed; if (!active) Primary(change);
         AutomationProperties.SetName(change, row.Profile.Email ?? row.Profile.DisplayName);
-        change.ToolTip = active ? L("当前使用的账号", "Current account") : authenticationFailed ? L("登录已失效，请先恢复登录后再切换", "Sign-in expired; restore sign-in before switching") : L("确认后切换此账号", "Confirm before switching to this account"); accountActions.Children.Add(change);
+        change.ToolTip = active ? L("当前使用的账号", "Current account") : authenticationFailed ? L("登录已失效，请先重新授权后再切换", "Sign-in expired; authorize again before switching") : L("确认后切换此账号", "Confirm before switching to this account"); accountActions.Children.Add(change);
         var count = row.Usage?.ResetCreditsRemaining?.ToString(CultureInfo.CurrentCulture) ?? T("unknown");
         var resetting = resetRotation?.Includes(row.Profile.Id) == true;
         var reset = Button(resetting ? L("重置中…", "Resetting…") : L("重置 " + count + " 次", "Reset " + count), () => { if (row.Usage?.ResetCreditsRemaining > 0) StartConfirmation(row, "resetQuota"); }, "\uE777");
@@ -458,13 +468,18 @@ public sealed class MainWindow : Window
         if (active) border.SetResourceReference(Border.BorderBrushProperty, "AccentBorder");
         return border;
     }
-    private Grid UsageLine(string title, int? percent, DateTimeOffset? reset = null, bool weekly = false)
+    private Grid UsageLine(string title, int? percent, DateTimeOffset? reset = null, bool weekly = false, bool cached = false)
     {
         var grid = new Grid { Margin = new Thickness(0, 0, 0, 6) };
         for (var index = 0; index < 3; index++) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var label = Text(title, 15);
+        var caption = new StackPanel { Orientation = Orientation.Horizontal }; caption.Children.Add(label);
+        if (cached) {
+            var stale = Text(L("上次额度", "Cached"), 11, muted: true); stale.Margin = new Thickness(8, 0, 0, 0);
+            stale.ToolTip = L("显示上次额度，仅供参考", "Showing the last known quota for reference"); caption.Children.Add(stale);
+        }
         var remaining = Text(percent.HasValue ? percent + "%" : "—", 17, bold: true); remaining.SetResourceReference(TextBlock.ForegroundProperty, AccountVisuals.QuotaTone(percent));
-        remaining.HorizontalAlignment = HorizontalAlignment.Right; grid.Children.Add(Pair(label, remaining));
+        remaining.HorizontalAlignment = HorizontalAlignment.Right; grid.Children.Add(Pair(caption, remaining));
         var track = new Grid { Height = 6, Margin = new Thickness(0, 5, 0, 5) };
         var rail = new Border { CornerRadius = new CornerRadius(3) }; rail.SetResourceReference(Border.BackgroundProperty, "Track"); track.Children.Add(rail);
         var fill = new Border { CornerRadius = new CornerRadius(3), HorizontalAlignment = HorizontalAlignment.Left };

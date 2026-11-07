@@ -17,7 +17,7 @@ public sealed class AddAccountWindow : Window
     public AddAccountWindow(bool chinese = true, bool canImport = true, Func<Task>? readLocal = null, bool recovery = false)
     {
         string L(string zh, string en) => chinese ? zh : en;
-        Title = (recovery ? L("恢复登录", "Restore sign-in") : L("添加账号", "Add account")) + " · " + App.DisplayName;
+        Title = (recovery ? L("重新授权", "Authorize again") : L("添加账号", "Add account")) + " · " + App.DisplayName;
         Icon = System.Windows.Media.Imaging.BitmapFrame.Create(App.IconUri);
         Width = Math.Min(560, SystemParameters.WorkArea.Width - 24);
         MaxHeight = Math.Max(320, SystemParameters.WorkArea.Height - 24);
@@ -25,7 +25,7 @@ public sealed class AddAccountWindow : Window
         WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
         SetResourceReference(BackgroundProperty, "Surface"); SetResourceReference(ForegroundProperty, "Ink");
         var panel = new StackPanel { Margin = new Thickness(26) };
-        panel.Children.Add(new TextBlock { Text = recovery ? L("恢复登录", "Restore sign-in") : L("添加账号", "Add account"), FontSize = 26, FontWeight = FontWeights.SemiBold });
+        panel.Children.Add(new TextBlock { Text = recovery ? L("重新授权", "Authorize again") : L("添加账号", "Add account"), FontSize = 26, FontWeight = FontWeights.SemiBold });
         var intro = new TextBlock { Text = recovery
             ? L("重新授权同一账号以更新登录，或导入有效 JSON、获取本地账号。", "Authorize the same account again to update its sign-in, or import valid JSON or get the local account.")
             : L("选择一种添加方式", "Choose how to add your account"), TextWrapping = TextWrapping.Wrap, FontSize = 15, Margin = new Thickness(0, 8, 0, 22) };

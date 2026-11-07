@@ -35,7 +35,7 @@ $setup=Join-Path $OutputDirectory ("Star-Codex-Switcher-$releaseVersion-Setup-x6
 if($LASTEXITCODE -ne 0){throw 'NSIS build failed'}
 $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($setup+'.sha256',"$hash  $([IO.Path]::GetFileName($setup))`n",[Text.UTF8Encoding]::new($false))
-$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：修复取消添加后的进程退出与临时目录清理，正常取消不再报错；同一账号重新授权后更新原卡片凭据并刷新登录状态，防止旧凭据回写；全面补齐中文界面和组合错误提示。保留已有账号、设置和安装位置。"}
+$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：登录失效提示改为紧凑两行并使用圆圈感叹号；右侧提供重新授权，可选择浏览器授权更新原账号；明确区分服务端撤销、普通授权失效和网络故障。保留已有账号、设置和安装位置。"}
 [IO.File]::WriteAllText((Join-Path $OutputDirectory 'update-installed.json'),($feed|ConvertTo-Json)+"`n",[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $projectRoot 'windows\artifacts\latest-installed-build.txt'),$publish)
 Write-Output $setup
