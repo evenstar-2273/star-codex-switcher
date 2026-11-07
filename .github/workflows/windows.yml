@@ -42,7 +42,7 @@ jobs:
       - name: Check cancellable authorization
         shell: pwsh
         run: |
-          swift test --filter 'AccountCancellationTests|AccountControllerTests|QuotaRefreshSettingsTests|AccountRemovalTests|CredentialSyncTests|SwitchServiceTests'
+          swift test --filter 'AccountCancellationTests|AccountReauthorizationTests|AccountControllerTests|QuotaRefreshSettingsTests|AccountRemovalTests|CredentialSyncTests|SwitchServiceTests'
           if ($LASTEXITCODE -ne 0) { throw 'Swift cancellation checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- login-cancel ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Authorization cancellation checks failed.' }

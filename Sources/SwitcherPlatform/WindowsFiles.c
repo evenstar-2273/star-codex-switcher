@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <sddl.h>
 #include <aclapi.h>
+#include <bcrypt.h>
 #include <objbase.h>
 #include <wchar.h>
 #include <stdlib.h>
@@ -63,6 +64,16 @@ uint32_t switcher_check_path(const char *utf8_path) {
     DWORD error = check_path(path); free(path); return error;
 }
 
+uint32_t switcher_sha256(const void *bytes, size_t count, unsigned char *digest) {
+    if (!digest || count > MAXULONG || (!bytes && count)) return ERROR_INVALID_PARAMETER;
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0);
+    if (status < 0) return ERROR_GEN_FAILURE;
+    status = BCryptHash(algorithm, NULL, 0, (PUCHAR)bytes, (ULONG)count, digest, 32);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return status < 0 ? ERROR_GEN_FAILURE : ERROR_SUCCESS;
+}
+
 uint32_t switcher_restrict_path(const char *utf8_path, int directory) {
     wchar_t *path = wide_path(utf8_path);
     if (!path) return GetLastError();
@@ -117,4 +128,5 @@ uint32_t switcher_atomic_write(const char *utf8_path, const void *bytes, size_t 
 uint32_t switcher_restrict_path(const char *path, int directory) { (void)path; (void)directory; return 0; }
 uint32_t switcher_atomic_write(const char *path, const void *bytes, size_t count) { (void)path; (void)bytes; (void)count; return 0; }
 uint32_t switcher_check_path(const char *path) { (void)path; return 0; }
+uint32_t switcher_sha256(const void *bytes, size_t count, unsigned char *digest) { (void)bytes; (void)count; (void)digest; return 1; }
 #endif

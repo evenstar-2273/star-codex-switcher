@@ -63,6 +63,9 @@ struct CodexClientTransportTests {
         task.cancel()
         do { _ = try await task.value; Issue.record("Expected cancellation") }
         catch { #expect(error is CancellationError) }
+        // Cleanup failures must fail the test instead of disappearing in defer's try?.
+        try FileManager.default.removeItem(at: home)
+        #expect(!FileManager.default.fileExists(atPath: home.path))
     }
 
     private func makeClient(timeout: Duration = .seconds(5)) -> CodexClient {

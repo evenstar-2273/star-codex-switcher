@@ -292,6 +292,8 @@ public enum AccountStoreError: LocalizedError, Equatable, Sendable {
 public enum CodexClientError: LocalizedError, Equatable, Sendable {
     case executableNotFound
     case processLaunchFailed(String)
+    case processTerminationTimedOut
+    case authorizedAccountMismatch
     case malformedResponse
     case remoteError(code: Int?, message: String)
     case connectionClosed
@@ -307,6 +309,10 @@ public enum CodexClientError: LocalizedError, Equatable, Sendable {
             "The Codex executable could not be found."
         case let .processLaunchFailed(message):
             "Codex app-server failed to start: \(message)"
+        case .processTerminationTimedOut:
+            "The Codex account process did not stop in time. Its files were left unchanged."
+        case .authorizedAccountMismatch:
+            "The authorized account does not match the account being restored. Sign in with the selected account."
         case .malformedResponse:
             "Codex app-server returned malformed JSON."
         case let .remoteError(code, message):

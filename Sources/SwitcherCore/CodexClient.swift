@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -197,6 +198,43 @@ private final class StderrDrain: @unchecked Sendable {
     }
 }
 
+/// Process shutdown must finish even when the caller is already cancelled.
+/// The timeout uses Dispatch rather than a cancellable task sleep.
+final class ProcessExitBarrier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var exited = false
+    private var waiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
+
+    func markExited() {
+        lock.lock()
+        exited = true
+        let pending = Array(waiters.values)
+        waiters.removeAll()
+        lock.unlock()
+        pending.forEach { $0.resume(returning: true) }
+    }
+
+    func wait(timeout: TimeInterval) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let id = UUID()
+            lock.lock()
+            if exited {
+                lock.unlock()
+                continuation.resume(returning: true)
+                return
+            }
+            waiters[id] = continuation
+            lock.unlock()
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [self] in
+                lock.lock()
+                let pending = waiters.removeValue(forKey: id)
+                lock.unlock()
+                pending?.resume(returning: false)
+            }
+        }
+    }
+}
+
 private actor JSONRPCSession {
     private let process: Process
     private let input: FileHandle
@@ -204,6 +242,8 @@ private actor JSONRPCSession {
     private let errorOutput: FileHandle
     private let pump: LinePump
     private let stderrDrain: StderrDrain
+    private let exitBarrier: ProcessExitBarrier
+    private var stopTask: Task<Void, any Error>?
     private let decoder = JSONDecoder()
     private var didTimeout = false
     private var pendingNotifications: [RPCEnvelope] = []
@@ -221,6 +261,8 @@ private actor JSONRPCSession {
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
+        let exitBarrier = ProcessExitBarrier()
+        process.terminationHandler = { _ in exitBarrier.markExited() }
 
         let pump = LinePump(handle: outputPipe.fileHandleForReading)
         let stderrDrain = StderrDrain(handle: errorPipe.fileHandleForReading)
@@ -230,6 +272,7 @@ private actor JSONRPCSession {
         errorOutput = errorPipe.fileHandleForReading
         self.pump = pump
         self.stderrDrain = stderrDrain
+        self.exitBarrier = exitBarrier
 
         do {
             try process.run()
@@ -274,16 +317,33 @@ private actor JSONRPCSession {
         return envelope.params ?? .object([:])
     }
 
-    public func stop() {
+    public func stop() async throws {
+        try await beginStop().value
+    }
+
+    private func beginStop() -> Task<Void, any Error> {
+        if let stopTask { return stopTask }
+        let task = Task { try await self.finishStop() }
+        stopTask = task
+        return task
+    }
+
+    private func finishStop() async throws {
         if process.isRunning {
             process.terminate()
         }
         try? input.close()
         pump.finish()
         stderrDrain.finish()
-        // End the writer before detaching Windows pipe readers, which may be waiting for data.
+        guard await exitBarrier.wait(timeout: 5) else {
+            throw CodexClientError.processTerminationTimedOut
+        }
+        // TerminateProcess only requests termination. Wait for confirmed exit
+        // before detaching pipe readers or allowing deletion of the profile.
         output.readabilityHandler = nil
         errorOutput.readabilityHandler = nil
+        try? output.close()
+        try? errorOutput.close()
     }
 
     private func response(id: Int, timeout: Duration) async throws -> RPCEnvelope {
@@ -336,7 +396,7 @@ private actor JSONRPCSession {
 
     private func triggerTimeout() {
         didTimeout = true
-        stop()
+        _ = beginStop()
     }
 
     private func send(_ object: [String: Any]) throws {
@@ -616,16 +676,16 @@ public struct CodexClient: AccountClient {
                 try Task.checkCancellation()
                 try await session.initialize(timeout: requestTimeout, clientVersion: clientVersion)
                 let result = try await operation(session)
-                await session.stop()
+                try await session.stop()
                 try Task.checkCancellation()
                 return result
             } catch {
-                await session.stop()
+                try await session.stop()
                 if Task.isCancelled { throw CancellationError() }
                 throw error
             }
         } onCancel: {
-            Task { await session.stop() }
+            Task { try? await session.stop() }
         }
     }
 

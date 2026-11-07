@@ -110,7 +110,9 @@ public sealed class UpdateAvailableWindow : Window
                 _ => "Preparing the update…"
             };
         }
-        status.Text = message ?? ""; status.Visibility = string.IsNullOrEmpty(message) ? Visibility.Collapsed : Visibility.Visible;
+        status.Text = installing ? message ?? "" : WindowsLocalization.Error(message, chinese ? "simplifiedChinese" : "english") ?? "";
+        status.ToolTip = installing ? null : WindowsLocalization.TechnicalDetails(localError ?? native.UpdateDiagnostic ?? message, chinese ? "simplifiedChinese" : "english");
+        status.Visibility = string.IsNullOrEmpty(message) ? Visibility.Collapsed : Visibility.Visible;
         status.SetResourceReference(TextBlock.ForegroundProperty, !installing && message != null ? "Danger" : "Muted");
     }
     private async Task InstallAsync()

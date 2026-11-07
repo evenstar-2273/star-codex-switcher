@@ -81,6 +81,7 @@ public sealed class NativeSettings
     public Func<Task>? ExitForUpdate { get; set; }
     public bool HasChecked { get; private set; }
     public string? UpdateError { get; private set; }
+    public string? UpdateDiagnostic { get; private set; }
     public bool IsUpdatePromptOpen => activePrompt != null;
     public bool HasManualUpdatePrompt => AvailableUpdate is { } release && pendingManualVersion == VersionKey(release.Version);
     public bool ShouldShowUpdateBanner => AvailableUpdate is { } release && !IsSkippedVersion(release.Version);
@@ -127,13 +128,14 @@ public sealed class NativeSettings
         if (IsInstalling || IsUpdatePromptOpen) return;
         manualCheckRequested |= manual || HasManualUpdatePrompt;
         if (IsChecking) return;
-        IsChecking = true; UpdateError = null; pendingManualVersion = null; Changed?.Invoke();
+        IsChecking = true; UpdateError = null; UpdateDiagnostic = null; pendingManualVersion = null; Changed?.Invoke();
         try {
             var latest = await fetchUpdate(CancellationToken.None);
             AvailableUpdate = NormalizeVersion(latest.Version) > System.Version.Parse(Version) ? latest : null;
             if (manualCheckRequested && AvailableUpdate != null) pendingManualVersion = VersionKey(latest.Version);
             HasChecked = true;
         } catch (Exception ex) {
+            UpdateDiagnostic = WindowsLocalization.Redact(ex.Message);
             HasChecked = false;
             UpdateError = ex is FormatException or InvalidOperationException ? ex.Message : "更新检查失败，请稍后重试。";
         } finally { IsChecking = false; manualCheckRequested = false; Changed?.Invoke(); }
@@ -160,7 +162,7 @@ public sealed class NativeSettings
         if (ExitForUpdate == null) { UpdateError = "当前运行方式不支持自动更新，请使用发布的 EXE。"; Changed?.Invoke(); return; }
         var release = activePrompt?.Release ?? AvailableUpdate;
         var attempt = ++installAttempt;
-        IsInstalling = true; UpdateError = null; SetInstallProgress("准备下载更新……"); Changed?.Invoke();
+        IsInstalling = true; UpdateError = null; UpdateDiagnostic = null; SetInstallProgress("准备下载更新……"); Changed?.Invoke();
         try {
             var progress = new Progress<string>(message => {
                 if (!IsInstalling || attempt != installAttempt) return;
@@ -170,6 +172,7 @@ public sealed class NativeSettings
             SetInstallProgress("安装程序已就绪，正在关闭并安装重启……"); Changed?.Invoke();
             await ExitForUpdate();
         } catch (Exception ex) {
+            UpdateDiagnostic = WindowsLocalization.Redact(ex.Message);
             UpdateError = ex is System.IO.IOException ? ex.Message : "更新未完成，当前版本和账号数据保留，请稍后重试。";
             InstallStatus = null; InstallProgress = null; IsInstalling = false; Changed?.Invoke();
         }

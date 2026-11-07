@@ -71,7 +71,7 @@ public sealed class JsonImportWindow : Window
         submit.SetResourceReference(Button.BackgroundProperty, "Accent"); submit.SetResourceReference(Button.ForegroundProperty, "OnAccent");
         submit.SetResourceReference(Button.BorderBrushProperty, "Accent");
         AutomationProperties.SetName(submit, "导入粘贴的 JSON");
-        clear.Click += (_, _) => { editor.Clear(); status.Text = ""; editor.Focus(); };
+        clear.Click += (_, _) => { editor.Clear(); status.Text = ""; status.ToolTip = null; editor.Focus(); };
         close.Click += (_, _) => Close();
         editor.TextChanged += (_, _) => {
             submit.IsEnabled = !importing && !string.IsNullOrWhiteSpace(editor.Text);
@@ -83,12 +83,14 @@ public sealed class JsonImportWindow : Window
             importing = true; submit.IsEnabled = false; clear.IsEnabled = false; close.IsEnabled = false; file.IsEnabled = false; editor.IsReadOnly = true;
             status.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
             status.Text = "正在验证格式并导入…";
+            status.ToolTip = null;
             try {
                 _ = files == null ? await importer.ImportTextAsync(editor.Text) : await importer.ImportFilesAsync(files);
                 editor.Clear(); succeeded = true;
             } catch (Exception ex) {
                 status.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
                 status.Text = WindowsLocalization.Error(ex.Message, (importer as IAccountClient)?.State.Settings.Language ?? "simplifiedChinese");
+                status.ToolTip = WindowsLocalization.TechnicalDetails(ex.Message, (importer as IAccountClient)?.State.Settings.Language ?? "simplifiedChinese");
             } finally {
                 importing = false; clear.IsEnabled = true; close.IsEnabled = true; file.IsEnabled = true; editor.IsReadOnly = false;
                 submit.IsEnabled = !string.IsNullOrWhiteSpace(editor.Text);
@@ -98,8 +100,15 @@ public sealed class JsonImportWindow : Window
         submit.Click += async (_, _) => await ImportAsync();
         file.Click += async (_, _) => {
             if (importing) return;
-            var dialog = new Microsoft.Win32.OpenFileDialog { Title = "选择账号 JSON", Filter = "JSON 文件 (*.json)|*.json", Multiselect = true, CheckFileExists = true };
-            if (dialog.ShowDialog(this) == true) await ImportAsync(dialog.FileNames);
+            try {
+                var dialog = new Microsoft.Win32.OpenFileDialog { Title = "选择账号 JSON", Filter = "JSON 文件 (*.json)|*.json", Multiselect = true, CheckFileExists = true };
+                if (dialog.ShowDialog(this) == true) await ImportAsync(dialog.FileNames);
+            } catch (Exception ex) {
+                status.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
+                var language = (importer as IAccountClient)?.State.Settings.Language ?? "simplifiedChinese";
+                status.Text = WindowsLocalization.Error(ex.Message, language);
+                status.ToolTip = WindowsLocalization.TechnicalDetails(ex.Message, language);
+            }
         };
         buttons.Children.Add(clear); buttons.Children.Add(file); buttons.Children.Add(close); buttons.Children.Add(submit);
         Grid.SetRow(buttons, 1); footer.Children.Add(buttons);

@@ -5,6 +5,9 @@ import Darwin
 #if os(Windows)
 import SwitcherPlatform
 #endif
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 
 public protocol AccountStoring: Sendable {
     func loadRegistry() async throws -> AccountRegistry
@@ -238,7 +241,7 @@ public actor AccountStore: AccountStoring {
         try saveRegistry(current)
     }
 
-    public func addProfile(_ profile: AccountProfile) throws {
+    public func addProfile(_ profile: AccountProfile, replacingAccountID: UUID? = nil) throws {
         try Task.checkCancellation()
         let authURL = profileHome(id: profile.id).appending(path: "auth.json")
         guard fileManager.fileExists(atPath: authURL.path) else {
@@ -247,8 +250,50 @@ public actor AccountStore: AccountStoring {
         try restrictPermissions(authURL, directory: false)
         var current = try loadRegistry()
         let identity = AccountIdentity(accountID: profile.accountID, email: profile.email)
-        guard !current.accounts.contains(where: { identity.matches($0) }) else {
-            throw AccountStoreError.duplicateAccount
+        if let replacingAccountID {
+            guard let target = current.accounts.first(where: { $0.id == replacingAccountID }) else {
+                throw AccountStoreError.profileNotFound
+            }
+            guard identity.matches(target) else {
+                throw CodexClientError.authorizedAccountMismatch
+            }
+        }
+        if let existing = current.accounts.first(where: { candidate in
+            replacingAccountID.map { candidate.id == $0 } ?? identity.matches(candidate)
+        }) {
+            // A successful browser authorization renews the same saved account in place.
+            let bytes = try readChecked(authURL)
+            guard let verified = try CredentialIdentity.decode(bytes), verified.matches(profile), verified.matches(existing) else {
+                throw CodexClientError.identityUnavailable
+            }
+            let destination = profileHome(id: existing.id).appending(path: "auth.json")
+            try checkPath(destination)
+            let live = activeHomeURL.appending(path: "auth.json")
+            if fileManager.fileExists(atPath: live.path) {
+                let oldLive = try readChecked(live)
+                if let oldIdentity = try CredentialIdentity.decode(oldLive), oldIdentity.matches(existing) {
+                    // Persist only a fingerprint, never a second copy of the old token.
+                    // A later refresh/restart must not overwrite this renewal with that exact old login.
+                    try Task.checkCancellation()
+                    let marker = ReauthorizationMarker(previousLive: try credentialFingerprint(oldLive),
+                        savedCredential: try credentialFingerprint(bytes))
+                    let markerURL = reauthorizationMarker(id: existing.id)
+                    var protection: [ReauthorizationMarker] = []
+                    if fileManager.fileExists(atPath: markerURL.path), fileManager.fileExists(atPath: destination.path) {
+                        let savedHash = try credentialFingerprint(readChecked(destination))
+                        let previous = try Self.decoder.decode([ReauthorizationMarker].self, from: readChecked(markerURL))
+                        protection = Array(previous.filter {
+                            $0.previousLive == marker.previousLive && $0.savedCredential == savedHash
+                        }.prefix(1))
+                    }
+                    // Preserve the last committed renewal if a second renewal fails between writes.
+                    protection.append(marker)
+                    try writeJSON(protection, to: markerURL)
+                }
+            }
+            try Task.checkCancellation()
+            try secureAtomicWrite(bytes, to: destination)
+            return
         }
         current.removedAccountIdentities.removeAll { identity.matches($0) }
         current.accounts.append(profile)
@@ -267,7 +312,9 @@ public actor AccountStore: AccountStoring {
         var current = try loadRegistry()
         if let profile = current.accounts.first(where: { identity.matches($0) }) {
             let destination = profileHome(id: profile.id).appending(path: "auth.json")
-            if try readChecked(destination) != bytes { try secureAtomicWrite(bytes, to: destination) }
+            if try !preserveReauthorizedCredential(profile: profile, liveBytes: bytes) {
+                if try readChecked(destination) != bytes { try secureAtomicWrite(bytes, to: destination) }
+            }
             if current.removedAccountIdentities.contains(where: { identity.matches($0) }) {
                 current.removedAccountIdentities.removeAll { identity.matches($0) }
                 try saveRegistry(current)
@@ -354,7 +401,11 @@ public actor AccountStore: AccountStoring {
         guard fileManager.fileExists(atPath: source.path) else {
             throw AccountStoreError.activeCredentialMissing
         }
-        try copyCredential(from: source, to: profileHome(id: activeID).appending(path: "auth.json"))
+        let bytes = try readChecked(source)
+        let profile = try profile(id: activeID)
+        if try !preserveReauthorizedCredential(profile: profile, liveBytes: bytes) {
+            try secureAtomicWrite(bytes, to: profileHome(id: activeID).appending(path: "auth.json"))
+        }
     }
 
     public func activateTargetCredential(id: UUID) throws {
@@ -449,6 +500,47 @@ public actor AccountStore: AccountStoring {
     private func copyCredential(from source: URL, to destination: URL) throws {
         let bytes = try readChecked(source)
         try secureAtomicWrite(bytes, to: destination)
+    }
+
+    private func reauthorizationMarker(id: UUID) -> URL {
+        profileHome(id: id).appending(path: "reauthorization-live.json")
+    }
+
+    private struct ReauthorizationMarker: Codable {
+        let previousLive: String
+        let savedCredential: String
+    }
+
+    private func preserveReauthorizedCredential(profile: AccountProfile, liveBytes: Data) throws -> Bool {
+        let markerURL = reauthorizationMarker(id: profile.id)
+        guard fileManager.fileExists(atPath: markerURL.path) else { return false }
+        let markers = try Self.decoder.decode([ReauthorizationMarker].self, from: readChecked(markerURL))
+        let liveHash = try credentialFingerprint(liveBytes)
+        guard markers.contains(where: { $0.previousLive == liveHash }) else { return false }
+        let saved = try readChecked(profileHome(id: profile.id).appending(path: "auth.json"))
+        // The marker is written first. If credential replacement fails or the process exits
+        // between the two writes, it must not suppress synchronization of the live login.
+        let savedHash = try credentialFingerprint(saved)
+        guard markers.contains(where: { $0.previousLive == liveHash && $0.savedCredential == savedHash }) else { return false }
+        guard let identity = try CredentialIdentity.decode(saved), identity.matches(profile) else { return false }
+        return true
+    }
+
+    private func credentialFingerprint(_ bytes: Data) throws -> String {
+        #if os(Windows)
+        var hash = [UInt8](repeating: 0, count: 32)
+        let error = bytes.withUnsafeBytes { buffer in
+            switcher_sha256(buffer.baseAddress, buffer.count, &hash)
+        }
+        guard error == 0 else { throw windowsError(error) }
+        #elseif canImport(CryptoKit)
+        let hash = Array(SHA256.hash(data: bytes))
+        #else
+        throw CodexClientError.identityUnavailable
+        #endif
+        #if os(Windows) || canImport(CryptoKit)
+        return hash.map { String(format: "%02x", $0) }.joined()
+        #endif
     }
 
     private func checkPath(_ path: URL) throws {

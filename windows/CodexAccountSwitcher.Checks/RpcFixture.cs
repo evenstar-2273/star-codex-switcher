@@ -3,6 +3,10 @@ using System.Text.Json;
 // Executed only by the shared Swift tests with a temporary CODEX_HOME.
 internal static class RpcFixture
 {
+    // Intentionally retained until process exit: cancellation must wait for the OS
+    // to release a profile handle, rather than only cancelling the RPC read task.
+    private static FileStream? heldLoginFile;
+
     public static async Task RunAsync()
     {
         var home = Environment.GetEnvironmentVariable("CODEX_HOME") ?? throw new Exception("Missing fixture home");
@@ -21,16 +25,25 @@ internal static class RpcFixture
                 "account/login/start" => new { authUrl = "https://example.test/sign-in" },
                 _ => new { }
             };
+            if (method == "account/read" && Environment.GetEnvironmentVariable("SWITCHER_LOGIN_FIXTURE_ROOT") != null &&
+                File.Exists(Path.Combine(home, "auth.json"))) {
+                var credential = CodexAccountSwitcher.Core.LoginCredential.Read(Path.Combine(home, "auth.json"));
+                result = new { account = new { accountId = credential.AccountID, email = credential.Email } };
+            }
             if (method == "account/login/start" && scenario == "login") {
                 await Console.Out.WriteLineAsync(JsonSerializer.Serialize(new { method = "account/login/completed", @params = new { success = true } }));
             }
             if (method == "account/login/start" && Environment.GetEnvironmentVariable("SWITCHER_LOGIN_FIXTURE_ROOT") is { } fixtureRoot) {
+                var lockedFile = Path.Combine(home, "fixture-login.lock");
+                heldLoginFile ??= new FileStream(lockedFile, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
                 await File.WriteAllTextAsync(Path.Combine(fixtureRoot, "login-session-" + Environment.ProcessId + ".json"),
-                    JsonSerializer.Serialize(new { pid = Environment.ProcessId, home }));
+                    JsonSerializer.Serialize(new { pid = Environment.ProcessId, home, lockedFile }));
                 // A cancelled owned process must stop before this simulated late browser callback can write anything.
                 _ = Task.Run(async () => {
                     while (!File.Exists(Path.Combine(fixtureRoot, "complete-" + Environment.ProcessId))) await Task.Delay(20);
-                    await File.WriteAllBytesAsync(Path.Combine(home, "auth.json"), GuardedChecks.Credential("late-cancelled-login").Bytes);
+                    var supplied = Path.Combine(fixtureRoot, "login-credential.json");
+                    var bytes = File.Exists(supplied) ? await File.ReadAllBytesAsync(supplied) : GuardedChecks.Credential("late-cancelled-login").Bytes;
+                    await File.WriteAllBytesAsync(Path.Combine(home, "auth.json"), bytes);
                     await Console.Out.WriteLineAsync(JsonSerializer.Serialize(new { method = "account/login/completed", @params = new { success = true } }));
                     await Console.Out.FlushAsync();
                 });

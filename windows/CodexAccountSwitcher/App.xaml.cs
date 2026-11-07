@@ -54,7 +54,7 @@ public partial class App : Application
         if (!startRuntime) return;
         if (e.Args.Length == 2 && e.Args[0] == "--apply-update") {
             try { await UpdateInstaller.RunHelperAsync(e.Args[1]); Shutdown(); }
-            catch (Exception ex) { MessageBox.Show("更新未完成。" + ex.Message, DisplayName + " 更新", MessageBoxButton.OK, MessageBoxImage.Error); Shutdown(1); }
+            catch (Exception ex) { ShowStartupError(ex.Message, "system"); Shutdown(1); }
             return;
         }
         if (e.Args.Length == 3 && e.Args[0] == "--cleanup-install-shortcuts") {
@@ -146,9 +146,17 @@ public partial class App : Application
             updates.Start();
             if (native.AutomaticallyCheckUpdates && native.HasUpdateServer) _ = native.CheckUpdatesAsync();
         } catch (Exception ex) {
-            MessageBox.Show(WindowsLocalization.Error(ex.Message, client?.State.Settings.Language ?? "simplifiedChinese"), DisplayName, MessageBoxButton.OK, MessageBoxImage.Error);
+            ShowStartupError(ex.Message, client?.State.Settings.Language ?? "simplifiedChinese");
             await QuitAsync();
         }
+    }
+
+    private static void ShowStartupError(string error, string language)
+    {
+        var message = WindowsLocalization.Error(error, language);
+        if (WindowsLocalization.SaveDiagnostic(error) is { } path)
+            message += WindowsLocalization.IsChinese(language) ? "\n\n脱敏诊断已保存：" + path : "\n\nSanitized diagnostic saved: " + path;
+        MessageBox.Show(message, DisplayName, MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     private void RefreshTray()

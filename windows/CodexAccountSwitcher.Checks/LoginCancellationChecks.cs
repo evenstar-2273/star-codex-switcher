@@ -11,7 +11,10 @@ internal static class LoginCancellationChecks
         try {
             await CommandCoordinationChecks.VerifyAsync();
             await CheckManagedAsync();
-            if (host != null) await CheckHostAsync(Path.GetFullPath(host));
+            if (host != null) {
+                await CheckHostAsync(Path.GetFullPath(host));
+                await LoginReauthorizationChecks.VerifyAsync(Path.GetFullPath(host));
+            }
             Console.WriteLine($"PASS: {passed} login cancellation assertions; priority cancellation, bounded recovery, late replies, isolated original credentials.");
             return 0;
         } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
@@ -119,16 +122,25 @@ internal static class LoginCancellationChecks
                 await client.CommandAsync("add").WaitAsync(TimeSpan.FromSeconds(3));
                 Check(client.State.IsAddingAccount, "The actual host publishes its adding snapshot before completing the add acknowledgement.");
                 await browserStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var pendingSession = Directory.GetFiles(root, "login-session-*.json").Single();
+                using (var document = JsonDocument.Parse(File.ReadAllText(pendingSession))) {
+                    var lockedFile = document.RootElement.GetProperty("lockedFile").GetString()!;
+                    var exclusivelyHeld = false;
+                    try { using var probe = new FileStream(lockedFile, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite); }
+                    catch (IOException) { exclusivelyHeld = true; }
+                    Check(exclusivelyHeld, "The real login process holds a profile file with FileShare.None before cancellation.");
+                }
                 await client.CommandAsync("cancelAdd").WaitAsync(TimeSpan.FromSeconds(3));
                 await Until(() => !client.State.IsAddingAccount);
-                Check(!client.State.IsMutating, "Cancelling while the browser platform reply is pending completes cleanup.");
+                Check(!client.State.IsMutating && client.State.Error == null,
+                    "Cancelling while the browser platform reply is pending completes cleanup without a lock-file error.");
                 var sessions = Directory.GetFiles(root, "login-session-*.json");
                 Check(sessions.Length == 1, "Exactly one isolated login process was started.");
                 foreach (var session in sessions) {
                     using var document = JsonDocument.Parse(File.ReadAllText(session));
                     var pid = document.RootElement.GetProperty("pid").GetInt32();
                     var home = document.RootElement.GetProperty("home").GetString()!;
-                    await Until(() => !IsRunning(pid));
+                    Check(!IsRunning(pid), "The cancellation acknowledgement is sent only after the owned login process exits.");
                     Check(!Directory.Exists(home), "Cancellation removes the unregistered temporary login profile.");
                     File.WriteAllText(Path.Combine(root, "complete-" + pid), "late browser authorization");
                 }
@@ -141,7 +153,14 @@ internal static class LoginCancellationChecks
                 await Until(() => Volatile.Read(ref browserCalls) == 2);
                 await client.CommandAsync("cancelAdd").WaitAsync(TimeSpan.FromSeconds(3));
                 await Until(() => !client.State.IsAddingAccount);
-                Check(client.State.Accounts.Length == originalCount, "A second login cancels independently after a late first reply.");
+                Check(client.State.Error == null && client.State.Accounts.Length == originalCount,
+                    "A second login cancels independently after a late first reply without a cleanup error.");
+                foreach (var session in Directory.GetFiles(root, "login-session-*.json")) {
+                    using var document = JsonDocument.Parse(File.ReadAllText(session));
+                    Check(!IsRunning(document.RootElement.GetProperty("pid").GetInt32()) &&
+                        !Directory.Exists(document.RootElement.GetProperty("home").GetString()),
+                        "Every cancelled owned process has exited and its locked staging profile is gone.");
+                }
                 Check(File.ReadAllBytes(Path.Combine(active, "auth.json")).SequenceEqual(original), "Every real-host cancellation preserves the original active credential bytes.");
             }
         } finally {

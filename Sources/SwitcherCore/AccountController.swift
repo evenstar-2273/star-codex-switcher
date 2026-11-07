@@ -235,7 +235,7 @@ open class AccountController {
         }
     }
 
-    public func addAccount() {
+    public func addAccount(replacingAccountID: UUID? = nil) {
         guard !isMutating, !isAddingAccount else { return }
         visibleError = nil
         isAddingAccount = true
@@ -246,7 +246,7 @@ open class AccountController {
                 self.addAccountTask = nil
                 self.scheduleResetExpiryCheck()
             }
-            await self.performAddAccount()
+            await self.performAddAccount(replacingAccountID: replacingAccountID)
         }
     }
 
@@ -261,13 +261,17 @@ open class AccountController {
         await task?.value
     }
 
-    private func performAddAccount() async {
+    private func performAddAccount(replacingAccountID: UUID?) async {
         let id = UUID()
         do {
             let home = try await store.createProfileDirectory(id: id)
             try Task.checkCancellation()
             let identity = try await codex.login(profileHome: home)
             try Task.checkCancellation()
+            if let replacingAccountID {
+                let target = try await store.profile(id: replacingAccountID)
+                guard identity.matches(target) else { throw CodexClientError.authorizedAccountMismatch }
+            }
             let profile = AccountProfile(
                 id: id,
                 displayName: identity.suggestedDisplayName,
@@ -276,16 +280,34 @@ open class AccountController {
                 createdAt: Date(),
                 lastUsedAt: nil
             )
-            try await store.addProfile(profile)
+            try await store.addProfile(profile, replacingAccountID: replacingAccountID)
             apply(try await store.loadRegistry())
             await refreshSubscriptionSnapshots()
+            do {
+                // A new account keeps its registered home. Reauthorizing an
+                // existing account leaves only this unregistered staging home.
+                try await store.discardUnregisteredProfile(id: id)
+            } catch {
+                showError(NSError(domain: "CodexAccountSwitcher.LoginCleanup", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "The account was saved, but the incomplete account profile could not be removed: \(error.localizedDescription)",
+                ]))
+            }
         } catch {
             let loginError = error
+            // A process that has not exited may still own or write these files.
+            // Retain the unregistered home instead of racing its file handles.
+            if loginError as? CodexClientError == .processTerminationTimedOut {
+                showError(loginError)
+                return
+            }
             do {
                 try await store.discardUnregisteredProfile(id: id)
             } catch {
+                let message = loginError is CancellationError
+                    ? "Sign-in was cancelled, but the incomplete account profile could not be removed: \(error.localizedDescription)"
+                    : "\(loginError.localizedDescription) Removing the incomplete profile also failed: \(error.localizedDescription)"
                 showError(NSError(domain: "CodexAccountSwitcher.Login", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "\(loginError.localizedDescription) Removing the incomplete profile also failed: \(error.localizedDescription)",
+                    NSLocalizedDescriptionKey: message,
                 ]))
                 return
             }

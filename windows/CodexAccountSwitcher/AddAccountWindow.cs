@@ -27,7 +27,7 @@ public sealed class AddAccountWindow : Window
         var panel = new StackPanel { Margin = new Thickness(26) };
         panel.Children.Add(new TextBlock { Text = recovery ? L("恢复登录", "Restore sign-in") : L("添加账号", "Add account"), FontSize = 26, FontWeight = FontWeights.SemiBold });
         var intro = new TextBlock { Text = recovery
-            ? L("当前使用中的账号：请先在 Codex 中重新登录，再获取本地账号。其他已保存账号也可导入有效的账号 JSON 更新登录。", "For the current account, sign in to Codex again, then get the local account. Other saved accounts can also be updated by importing valid account JSON.")
+            ? L("重新授权同一账号以更新登录，或导入有效 JSON、获取本地账号。", "Authorize the same account again to update its sign-in, or import valid JSON or get the local account.")
             : L("选择一种添加方式", "Choose how to add your account"), TextWrapping = TextWrapping.Wrap, FontSize = 15, Margin = new Thickness(0, 8, 0, 22) };
         intro.SetResourceReference(TextBlock.ForegroundProperty, "Muted"); panel.Children.Add(intro);
         var methods = new List<Button>();
@@ -54,8 +54,9 @@ public sealed class AddAccountWindow : Window
             methods.Add(button);
             return button;
         }
-        if (!recovery) panel.Children.Add(Method(AddAccountMethod.Browser, L("浏览器授权", "Browser authorization"),
-            L("打开浏览器，使用 ChatGPT 账号登录并授权。", "Sign in with your ChatGPT account in the browser."), "\uE774"));
+        panel.Children.Add(Method(AddAccountMethod.Browser, L("浏览器授权", "Browser authorization"),
+            recovery ? L("在浏览器中重新登录此账号，更新已保存的登录凭据。", "Sign in to this same account in the browser to update its saved credentials.")
+                : L("打开浏览器，使用 ChatGPT 账号登录并授权。", "Sign in with your ChatGPT account in the browser."), "\uE774"));
         var import = Method(AddAccountMethod.Json, L("JSON 导入", "Import JSON"),
             L("粘贴账号 JSON 或 auth.json，也可选择文件导入。", "Paste account JSON or auth.json, or choose a file."), "\uE896");
         import.IsEnabled = canImport; panel.Children.Add(import);
@@ -74,11 +75,13 @@ public sealed class AddAccountWindow : Window
             foreach (var method in methods) method.IsEnabled = false;
             cancel.IsEnabled = false;
             status.SetResourceReference(TextBlock.ForegroundProperty, "Muted"); status.Text = L("正在读取本地账号…", "Reading local account…");
+            status.ToolTip = null;
             var succeeded = false;
             try { await readLocal(); SelectedMethod = AddAccountMethod.Local; succeeded = true; }
             catch (Exception ex) {
                 status.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
                 status.Text = WindowsLocalization.Error(ex.Message, chinese ? "simplifiedChinese" : "english");
+                status.ToolTip = WindowsLocalization.TechnicalDetails(ex.Message, chinese ? "simplifiedChinese" : "english");
             } finally {
                 reading = false;
                 foreach (var method in methods) method.IsEnabled = true;

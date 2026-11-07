@@ -62,7 +62,7 @@ public sealed class MainWindow : Window
             "status_bar_usage_window" => L("托盘显示额度", "Tray quota window"),
             "five_hour" => L("5 小时", "5 hours"), "weekly" => L("7 天", "7 days"),
             "launch_at_login" => L("开机启动", "Launch at login"), "language" => L("语言", "Language"),
-            "system_default" => L("跟随系统", "System"), "english" => "English", "simplified_chinese" => "简体中文",
+            "system_default" => L("跟随系统", "System"), "english" => L("英语", "English"), "simplified_chinese" => "简体中文",
             "auto_reset" => L("自动重置额度", "Automatically reset quota"),
             "auto_reset_hint" => L("启用后由账号核心在满足条件时使用重置卡。", "The account core uses reset credits when its automatic reset conditions are met."),
             "open_reset_log" => L("打开重置日志目录", "Open reset log folder"),
@@ -236,6 +236,7 @@ public sealed class MainWindow : Window
         var body = new StackPanel { Margin = new Thickness(26, 0, 26, 24) };
         if (State.Error != null || localError != null) {
             var message = Text(WindowsLocalization.Error(localError ?? State.Error!, State.Settings.Language), 14); message.TextWrapping = TextWrapping.Wrap; message.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
+            message.ToolTip = WindowsLocalization.TechnicalDetails(localError ?? State.Error, State.Settings.Language);
             var dismiss = Button("", () => { localError = null; _ = Run("dismissError"); Render(); }, "\uE711"); AutomationProperties.SetName(dismiss, L("关闭错误提示", "Dismiss error"));
             var alert = Box(Pair(message, dismiss), "WarningSurface"); alert.Padding = new Thickness(14); alert.Margin = new Thickness(0, 16, 0, 0); body.Children.Add(alert);
         }
@@ -260,7 +261,8 @@ public sealed class MainWindow : Window
             header.Margin = new Thickness(0, 26, 0, 24); body.Children.Add(header);
             if (State.IsAddingAccount) { var pending = Text(T("sign_in_pending_hint"), 14, muted: true); pending.TextWrapping = TextWrapping.Wrap; pending.Margin = new Thickness(0, 0, 0, 16); body.Children.Add(pending); }
             if (native.ShouldShowUpdateBanner || native.IsInstalling) {
-                var notice = Text(native.InstallStatus ?? native.UpdateError ?? L($"发现新版本 {NativeSettings.FormatVersion(native.AvailableUpdate!.Version)}", $"Update {NativeSettings.FormatVersion(native.AvailableUpdate!.Version)} available"), 14); notice.TextWrapping = TextWrapping.Wrap;
+                var notice = Text(native.InstallStatus ?? WindowsLocalization.Error(native.UpdateError, State.Settings.Language) ?? L($"发现新版本 {NativeSettings.FormatVersion(native.AvailableUpdate!.Version)}", $"Update {NativeSettings.FormatVersion(native.AvailableUpdate!.Version)} available"), 14); notice.TextWrapping = TextWrapping.Wrap;
+                notice.ToolTip = WindowsLocalization.TechnicalDetails(native.UpdateDiagnostic ?? native.UpdateError, State.Settings.Language);
                 var update = Button(L("更新并重启", "Update & restart"), native.RequestUpdatePrompt); Primary(update); update.IsEnabled &= !State.IsAddingAccount;
                 var banner = Box(Pair(notice, update)); banner.Padding = new Thickness(16); banner.Margin = new Thickness(0, 0, 0, 18); body.Children.Add(banner);
             }
@@ -315,7 +317,7 @@ public sealed class MainWindow : Window
         } else body.Children.Add(list);
     }
     private void OpenAddAccount() => OpenAddAccount(false);
-    private void OpenAddAccount(bool recovery)
+    private void OpenAddAccount(bool recovery, Guid? recoveryID = null)
     {
         if (IsBusy) return;
         if (State.IsAddingAccount) { _ = Run("cancelAdd"); return; }
@@ -327,7 +329,7 @@ public sealed class MainWindow : Window
                 throw new System.IO.IOException(L("未读取到本地登录账号，请先在 Codex 中完成登录后重试。", "No local signed-in account was found. Sign in to Codex and retry."));
         }, recovery) { Owner = this };
         if (choice.ShowDialog() != true || IsBusy || State.IsAddingAccount) return;
-        if (choice.SelectedMethod == AddAccountMethod.Browser) _ = Run("add");
+        if (choice.SelectedMethod == AddAccountMethod.Browser) _ = Run("add", recoveryID);
         else if (choice.SelectedMethod == AddAccountMethod.Json) OpenJsonImport();
     }
     private void OpenJsonImport() {
@@ -384,14 +386,15 @@ public sealed class MainWindow : Window
             failure.SetResourceReference(TextBlock.ForegroundProperty, tone); failure.TextWrapping = TextWrapping.Wrap;
             failure.TextTrimming = TextTrimming.None; heading.Children.Add(failure); warning.Children.Add(heading);
             var reason = Text(WindowsLocalization.Error(row.UsageError, State.Settings.Language), 14);
+            reason.ToolTip = WindowsLocalization.TechnicalDetails(row.UsageError, State.Settings.Language);
             reason.TextWrapping = TextWrapping.Wrap; reason.TextTrimming = TextTrimming.None; reason.Margin = new Thickness(0, 4, 0, 0);
-            reason.ToolTip = reason.Text; AutomationProperties.SetName(reason, L("额度刷新失败原因", "Quota refresh error")); warning.Children.Add(reason);
+            AutomationProperties.SetName(reason, L("额度刷新失败原因", "Quota refresh error")); warning.Children.Add(reason);
             if (row.Usage != null) {
                 var cached = Text(L("显示上次额度，仅供参考", "Showing the last known quota for reference"), 13, muted: true);
                 cached.TextWrapping = TextWrapping.Wrap; cached.Margin = new Thickness(0, 6, 0, 0); warning.Children.Add(cached);
             }
             if (expiredLogin) {
-                var authorize = Button(L("恢复登录", "Restore sign-in"), () => OpenAddAccount(true), "\uE72E"); authorize.Margin = new Thickness(0, 10, 0, 0); authorize.HorizontalAlignment = HorizontalAlignment.Left;
+                var authorize = Button(L("恢复登录", "Restore sign-in"), () => OpenAddAccount(true, row.Profile.Id), "\uE72E"); authorize.Margin = new Thickness(0, 10, 0, 0); authorize.HorizontalAlignment = HorizontalAlignment.Left;
                 authorize.IsEnabled &= !State.IsAddingAccount; warning.Children.Add(authorize);
             }
             var alert = Box(warning, expiredLogin ? "DangerSurface" : "WarningSurface", 9);
@@ -635,11 +638,12 @@ public sealed class MainWindow : Window
         var checkSchedule = Text(L("启用后启动时检查一次，此后每 60 分钟检查；同一版本本次运行仅自动提醒一次。",
             "When enabled, check at startup and every 60 minutes. Each version is prompted automatically only once per run."), 13, muted: true);
         checkSchedule.TextWrapping = TextWrapping.Wrap; checkSchedule.Margin = new Thickness(0, 0, 0, 14); updates.Children.Add(checkSchedule);
-        var status = native.InstallStatus ?? native.UpdateError ?? (native.IsChecking ? L("正在检查更新…", "Checking for updates…")
+        var status = native.InstallStatus ?? WindowsLocalization.Error(native.UpdateError, State.Settings.Language) ?? (native.IsChecking ? L("正在检查更新…", "Checking for updates…")
             : native.AvailableUpdate is { } release ? L($"发现新版本 {NativeSettings.FormatVersion(release.Version)}", $"Version {NativeSettings.FormatVersion(release.Version)} is available")
             : native.HasChecked ? L("当前已是最新版本。", "You are up to date.")
             : L("从 GitHub 检查更新；更新后自动重新启动，保留账号数据。", "Checks GitHub for updates. Updating restarts this tool and preserves account data."));
         var hint = Text(status, 14, muted: true); hint.TextWrapping = TextWrapping.Wrap; hint.Margin = new Thickness(0, 2, 0, 14); updates.Children.Add(hint);
+        hint.ToolTip = WindowsLocalization.TechnicalDetails(native.UpdateDiagnostic ?? native.UpdateError, State.Settings.Language);
         if (native.AvailableUpdate is { } update && !string.IsNullOrWhiteSpace(update.Notes)) {
             var notes = Text(update.Notes, 14, muted: true); notes.TextWrapping = TextWrapping.Wrap; notes.Margin = new Thickness(0, 0, 0, 14); updates.Children.Add(notes);
         }

@@ -99,7 +99,7 @@ private final class Host {
         case "refresh":
             model.refreshWeeklyUsage()
             await model.waitForWeeklyUsageRefresh()
-        case "add": model.addAccount()
+        case "add": model.addAccount(replacingAccountID: request.accountID)
         case "cancelAdd": await model.cancelAddingAccountAndWait()
         case "register": await model.registerCurrentAccount()
         case "switch":

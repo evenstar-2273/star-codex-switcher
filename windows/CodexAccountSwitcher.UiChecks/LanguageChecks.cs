@@ -18,12 +18,19 @@ internal static class LanguageChecks
     private const string IdentityError = "Codex did not return an account identity.";
     private const string StorageError = "Windows could not access private account storage (error 4393).";
     private const string StorageLinkError = "Account storage cannot use symbolic links or junctions.";
+    private const string PermissionError = "The operation could not be completed. You don’t have permission.";
+    private const string CancelledCleanup = "Sign-in was cancelled, but the incomplete account profile could not be removed: ";
+    private const string SavedCleanup = "The account was saved, but the incomplete account profile could not be removed: ";
+    private const string LegacyCancellation = "The operation could not be completed. (Swift.CancellationError error 1.)";
+    private const string LegacyCleanup = " Removing the incomplete profile also failed: ";
 
     internal static void Run(NativeSettings native, string output)
     {
         var original = CultureInfo.CurrentUICulture;
         try {
             CheckStorageMessages();
+            CheckCleanupMessages();
+            CheckUpdateErrors();
             CheckCase("zh-CN", "system", true, "system-language-zh.png");
             CheckCase("zh-CN", "english", false, null);
             CheckCase("en-US", "simplifiedChinese", true, null);
@@ -32,14 +39,17 @@ internal static class LanguageChecks
             CheckCase("zh-CN", "system", true, "storage-error-zh.png", StorageError);
             CheckCase("en-US", "simplifiedChinese", true, null, StorageError);
             CheckCase("zh-CN", "english", false, null, StorageError);
+            CheckCase("zh-CN", "system", true, "cancel-cleanup-permission-zh.png", LegacyCancellation + LegacyCleanup + PermissionError, "已取消添加账号");
+            CheckCase("zh-CN", "system", true, "saved-cleanup-permission-zh.png", SavedCleanup + PermissionError, "账号已保存");
+            CheckCase("zh-CN", "system", true, null, "This account is already saved. Select the existing account instead." + LegacyCleanup + PermissionError, "该账号已保存");
             CheckImportCase("zh-CN", "system", true, StorageLinkError, "import-storage-link-error-zh.png");
             CheckImportCase("en-US", "simplifiedChinese", true, StorageError, "import-storage-4393-error-zh.png");
             CheckImportCase("en-US", "simplifiedChinese", true, "The account storage directory could not be resolved (Windows error 1921).", "import-storage-target-error-zh.png");
             CheckImportCase("zh-CN", "english", false, StorageLinkError, null);
-            Console.WriteLine("PASS: Windows UI language wins over inherited English host strings; explicit language choices, localized identity/storage/import errors with original codes, failed import recovery and unchanged preferences verified.");
+            Console.WriteLine("PASS: Windows UI language, account/storage/cancellation/cleanup messages, known bilingual failures, private technical details, failed import recovery and unchanged preferences verified.");
         } finally { CultureInfo.CurrentUICulture = original; }
 
-        void CheckCase(string culture, string language, bool chinese, string? screenshot, string error = IdentityError)
+        void CheckCase(string culture, string language, bool chinese, string? screenshot, string error = IdentityError, string? expectedFragment = null)
         {
             CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo(culture);
             var client = new LanguageClient(language);
@@ -60,7 +70,10 @@ internal static class LanguageChecks
                 Require(buttons.Contains(chinese ? "添加账号" : "Add account"), "The add-account action uses native presentation copy.");
                 if (chinese) {
                     Require(!texts.Any(text => text is "Accounts" or "Settings" or "Add Account" or "No saved accounts" || text == error), "English host strings cannot leak into the Chinese empty-state/error screen.");
-                    if (error == StorageError) {
+                    if (expectedFragment != null) {
+                        Require(texts.Any(text => text.Contains(expectedFragment) && text.Contains("文件是否被占用及目录权限")), "Cleanup failure keeps its original operation outcome and a Chinese file-access explanation.");
+                        Require(!texts.Any(text => text.Contains("The operation") || text.Contains("Swift.CancellationError") || text.Contains("Removing the incomplete")), "Cancellation implementation strings never appear in the primary Chinese banner.");
+                    } else if (error == StorageError) {
                         Require(texts.Any(text => text.Contains("账号存储") && text.Contains("4393") && text.Contains("链接或重定向")), "The storage failure is visible in Chinese with its code and relevant troubleshooting hint.");
                         Require(!texts.Any(text => text.Contains("数据损坏") || text.Contains("账号丢失")), "A blocked storage path must not be presented as confirmed lost or corrupt account data.");
                     } else Require(texts.Any(text => text.Contains("Codex") && text.Contains("身份")), "The known identity error keeps its meaning in Chinese.");
@@ -75,7 +88,8 @@ internal static class LanguageChecks
                 client.State = client.State with { Error = "Unmapped diagnostic: fixture-only" };
                 window.Navigate("accounts");
                 window.UpdateLayout();
-                Require(Descendants<TextBlock>(window).Any(text => text.Text == "Unmapped diagnostic: fixture-only"), "Unrecognized diagnostics remain available instead of being hidden by a generic translation.");
+                Require(Descendants<TextBlock>(window).Any(text => text.Text == (chinese ? "操作未完成，请重试。可查看技术详情以进一步排查。" : "Unmapped diagnostic: fixture-only")
+                    && text.ToolTip?.ToString()?.Contains("Unmapped diagnostic: fixture-only") == true), "Unknown errors have a localized primary explanation and retain technical details separately.");
                 client.State = client.State with { Error = null };
                 window.Navigate("accounts"); window.UpdateLayout();
                 var normalTexts = Descendants<TextBlock>(window).Select(text => text.Text).ToArray();
@@ -134,7 +148,9 @@ internal static class LanguageChecks
             "Windows could not access private account storage (error unknown).",
             "Windows could not access private account storage (error 4393). Additional diagnostic.",
             "Unmapped diagnostic: fixture-only"
-        }) Require(WindowsLocalization.Error(message, "simplifiedChinese") == message, "Only the complete known storage error format is translated; other diagnostics are retained.");
+        }) Require(WindowsLocalization.Error(message, "simplifiedChinese")?.Contains("操作未完成") == true
+            && WindowsLocalization.TechnicalDetails(message, "simplifiedChinese")?.Contains(message) == true,
+            "Unrecognized storage formats are not guessed; the primary explanation is Chinese and full diagnostics remain separate.");
         Require(WindowsLocalization.Error("Account storage cannot use symbolic links or junctions.", "simplifiedChinese")?.Contains("链接或联接") == true,
             "The managed storage link rejection follows the same Chinese presentation.");
         Require(WindowsLocalization.Error("Windows user identity is unavailable.", "simplifiedChinese")?.Contains("Windows 用户身份") == true,
@@ -155,6 +171,81 @@ internal static class LanguageChecks
             "Choose a dedicated account storage folder, not a drive or Windows user folder."
         }) Require(WindowsLocalization.Error(message, "simplifiedChinese")?.Contains("账号数据") == true,
             "Invalid storage root choices display a Chinese diagnostic.");
+    }
+
+    private static void CheckCleanupMessages()
+    {
+        foreach (var permission in new[] { PermissionError, "The operation could not be completed. You don't have permission." }) {
+            foreach (var wrapper in new[] { CancelledCleanup, SavedCleanup, LegacyCancellation + LegacyCleanup }) {
+                var text = WindowsLocalization.Error(wrapper + permission, "simplifiedChinese")!;
+                Require(text.Contains("临时账号目录") && text.Contains("文件是否被占用及目录权限"), "Both Cocoa apostrophe forms explain cleanup access failures without assuming permission is the only cause.");
+                Require(!text.Contains("The operation") && !text.Contains("CancellationError"), "Known cleanup diagnostics do not leak English implementation text into primary copy.");
+            }
+        }
+        var saved = WindowsLocalization.Error(SavedCleanup + PermissionError, "simplifiedChinese")!;
+        Require(saved.StartsWith("账号已保存", StringComparison.Ordinal) && !saved.Contains("登录失败"), "A saved account plus cleanup failure must not be described as a failed sign-in.");
+        var duplicate = WindowsLocalization.Error("This account is already saved. Select the existing account instead." + LegacyCleanup + PermissionError, "simplifiedChinese")!;
+        Require(duplicate.Contains("该账号已保存") && duplicate.Contains("文件是否被占用及目录权限") && !duplicate.Contains("已取消"), "Legacy duplicate errors retain both independent causes rather than being mistaken for cancellation.");
+        foreach (var code in new[] { 5, 32, 33 }) {
+            var text = WindowsLocalization.Error(CancelledCleanup + $"Windows could not access private account storage (error {code}).", "simplifiedChinese")!;
+            Require(text.Contains(code.ToString(CultureInfo.InvariantCulture)) && text.Contains(code == 5 ? "访问权限" : "其他程序占用"), "Cleanup failures preserve Windows permission or sharing codes and their distinct reasons.");
+        }
+        Require(WindowsLocalization.Error(LegacyCancellation, "simplifiedChinese") == "已取消添加账号。", "Only the exact legacy Swift cancellation signature is recognized as cancellation.");
+        foreach (var unknown in new[] { "Cannot cancel the network operation: fixture failure", "CancellationError: permission denied by fixture", "Permission service rejected a request" }) {
+            var text = WindowsLocalization.Error(unknown, "simplifiedChinese")!;
+            Require(text.Contains("操作未完成") && !text.Contains("已取消") && !text.Contains("登录凭据已失效"), "Arbitrary cancel or permission words are neither suppressed nor misclassified as authentication failure.");
+            Require(WindowsLocalization.TechnicalDetails(unknown, "simplifiedChinese")!.Contains(unknown), "Unknown diagnostics remain available in a separate technical detail.");
+            Require(WindowsLocalization.Error(unknown, "english") == unknown, "English preference retains an unfamiliar diagnostic.");
+        }
+        var unknownCleanup = CancelledCleanup + "Fixture cleanup error 999: no known cause";
+        Require(WindowsLocalization.Error(unknownCleanup, "simplifiedChinese")!.Contains("未能清理")
+            && !WindowsLocalization.Error(unknownCleanup, "simplifiedChinese")!.Contains("Fixture"), "An unknown cleanup error remains a visible Chinese failure without guessing its cause.");
+        Require(WindowsLocalization.TechnicalDetails(unknownCleanup, "simplifiedChinese")!.Contains("999"), "Unknown cleanup codes remain available for diagnosis.");
+        foreach (var known in new[] {
+            "The Codex account process did not stop in time. Its files were left unchanged.",
+            "Account core is unavailable. Restart the app.",
+            "The runtime archive has no Swift host.",
+            "The shared Swift runtime is missing. Build with scripts/package-windows.ps1.",
+            "The refresh interval was not confirmed by the account service."
+        }) Require(WindowsLocalization.Error(known, "simplifiedChinese") != known && !WindowsLocalization.Error(known, "simplifiedChinese")!.Contains("操作未完成，请重试。可查看"), "Known process, runtime and settings errors have specific Chinese explanations.");
+        var mixed = "账号的登录凭据已失效（401）。请重新授权，或导入有效的完整账号凭据。 / Login rejected; reauthorize this account.\n已恢复原登录并重新打开 Codex。 / Previous login restored.";
+        var localized = WindowsLocalization.Error(mixed, "simplifiedChinese")!;
+        Require(localized.Contains("401") && localized.Contains("已恢复原登录") && !localized.Contains("Login") && !localized.Contains("Previous"), "Known bilingual account and recovery messages display only their selected language.");
+        Require(WindowsLocalization.Error("JSON 中没有账号。 / No accounts found.", "english") == "No accounts found.", "Internal bilingual errors also select English correctly.");
+        const string secrets = "Fixture diagnostic: access_token=access-value refresh_token=refresh-value id_token=id-value password=secret-password client_secret=secret-client Authorization: Bearer secret-bearer https://user:secret-url@example.test/callback?code=secret-code&state=secret-state eyJabc123456.eyJdef123456.signature123456 rt-secret-refresh sk-secret-api";
+        var details = WindowsLocalization.TechnicalDetails(secrets, "simplifiedChinese")!;
+        foreach (var secret in new[] { "access-value", "refresh-value", "id-value", "secret-password", "secret-client", "secret-bearer", "secret-url", "secret-code", "secret-state", "eyJabc123456", "rt-secret-refresh", "sk-secret-api" })
+            Require(!details.Contains(secret), "Technical details redact credential fields, bearer tokens, URL credentials, OAuth query secrets and standalone token formats.");
+        Require(details.Contains("Fixture diagnostic") && details.Contains("[redacted]"), "Redaction preserves useful non-secret diagnostic context.");
+    }
+
+    private static void CheckUpdateErrors()
+    {
+        const string failure = "Fixture update validation failed: access_token=fixture-secret";
+        var native = new NativeSettings(@"Software\StarCodexSwitcher.UiChecks\LanguageUpdate-" + Guid.NewGuid().ToString("N"),
+            _ => Task.FromException<UpdateRelease>(new FormatException(failure)));
+        native.CheckUpdatesAsync().GetAwaiter().GetResult();
+        Require(native.UpdateDiagnostic?.Contains("Fixture update validation failed") == true && !native.UpdateDiagnostic.Contains("fixture-secret"),
+            "Update diagnostics retain their cause without storing the synthetic credential.");
+        var window = new MainWindow(new LanguageClient("simplifiedChinese"), native) {
+            ShowActivated = false, ShowInTaskbar = false, WindowStartupLocation = WindowStartupLocation.Manual, Left = -32000, Top = -32000
+        };
+        var release = new UpdateRelease(new Version(9, 0, 0), new Uri("https://example.test/fixture.exe"), new string('0', 64), "合成更新说明");
+        var dialog = new UpdateAvailableWindow(native, new UpdatePromptRequest(release, true), true, () => false) {
+            ShowActivated = false, ShowInTaskbar = false, WindowStartupLocation = WindowStartupLocation.Manual, Left = -32000, Top = -32000
+        };
+        try {
+            window.Show(); window.Navigate("settings"); window.UpdateLayout();
+            dialog.Show(); dialog.UpdateLayout();
+            foreach (var surface in new Window[] { window, dialog }) {
+                var text = Descendants<TextBlock>(surface).ToArray();
+                Require(text.Any(block => block.Text.Contains("操作未完成")) && !text.Any(block => block.Text.Contains("Fixture update")),
+                    "Settings and the update dialog use Chinese primary text for unfamiliar update failures.");
+                Require(text.Any(block => block.ToolTip?.ToString()?.Contains("Fixture update validation failed") == true)
+                    && !text.Any(block => block.ToolTip?.ToString()?.Contains("fixture-secret") == true),
+                    "Both update surfaces retain only sanitized technical details.");
+            }
+        } finally { dialog.CloseForShutdown(); window.CloseForExit(); }
     }
 
     private static void Require(bool valid, string message) { if (!valid) throw new Exception(message); }

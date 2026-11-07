@@ -12,6 +12,7 @@ let package = Package(
         .target(name: "SwitcherPlatform", linkerSettings: [
             .linkedLibrary("advapi32", .when(platforms: [.windows])),
             .linkedLibrary("ole32", .when(platforms: [.windows])),
+            .linkedLibrary("bcrypt", .when(platforms: [.windows])),
         ]),
         .target(name: "SwitcherCore", dependencies: [
             .target(name: "SwitcherPlatform", condition: .when(platforms: [.windows])),

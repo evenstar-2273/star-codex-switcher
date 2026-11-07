@@ -191,7 +191,7 @@ public sealed class QuotaRefreshSelector : UserControl
     private async Task SaveAsync(int value, bool useCustom)
     {
         if (!enabled || saving) return;
-        custom = useCustom; invalid = saveFailed = saveSucceeded = false;
+        custom = useCustom; invalid = saveFailed = saveSucceeded = false; feedback.ToolTip = null;
         if (value == current) {
             minutes.Text = value.ToString(CultureInfo.InvariantCulture); saveSucceeded = true; ApplyPresentation(); return;
         }
@@ -199,7 +199,8 @@ public sealed class QuotaRefreshSelector : UserControl
         try {
             await save(value);
             current = value; minutes.Text = value.ToString(CultureInfo.InvariantCulture); saveSucceeded = true;
-        } catch {
+        } catch (Exception ex) {
+            feedback.ToolTip = WindowsLocalization.TechnicalDetails(ex.Message, chinese ? "simplifiedChinese" : "english");
             saveFailed = true;
             if (!useCustom) custom = !Presets.Contains(current);
         } finally { saving = false; ApplyPresentation(); }

@@ -219,16 +219,21 @@ internal static class RefreshResetChecks
                 "A VPN/proxy timeout uses an amber refresh warning and is not treated as expired authentication.");
             Capture(window, Path.Combine(output, $"account-auth-status-{(dark ? "dark" : "light")}.png"));
             Exception? dialogFailure = null;
+            var recoveryTarget = client.State.Accounts[0].Profile.Id;
+            var addCalls = client.AddCalls.Count;
             window.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => {
                 var dialog = app.Windows.OfType<AddAccountWindow>().Single(); dialog.UpdateLayout();
                 try {
-                    Check(All<Button>(dialog).Any(button => Name(button) == "获取本地账号") && All<Button>(dialog).Any(button => Name(button) == "JSON 导入") && !All<Button>(dialog).Any(button => Name(button) == "浏览器授权"),
-                        "Recovery exposes the supported local and JSON routes without a duplicate-account browser route.");
-                    Check(All<TextBlock>(dialog).Any(text => text.Text.Contains("先在 Codex 中重新登录")), "Recovery explains how the current local login must be renewed first.");
+                    Check(All<Button>(dialog).Any(button => Name(button) == "获取本地账号") && All<Button>(dialog).Any(button => Name(button) == "JSON 导入") && All<Button>(dialog).Any(button => Name(button) == "浏览器授权"),
+                        "Recovery exposes browser authorization, local login and JSON import routes.");
+                    Check(All<TextBlock>(dialog).Any(text => text.Text.Contains("重新授权同一账号")), "Recovery explicitly requires renewing the same selected account.");
                     Capture(dialog, Path.Combine(output, $"restore-login-{(dark ? "dark" : "light")}.png"));
-                } catch (Exception ex) { dialogFailure = ex; } finally { dialog.Close(); }
+                    Click(Button(dialog, "浏览器授权"));
+                } catch (Exception ex) { dialogFailure = ex; } finally { if (dialog.IsVisible) dialog.Close(); }
             }));
             Click(Button(expired, "恢复登录")); if (dialogFailure != null) throw dialogFailure;
+            Check(client.AddCalls.Count == addCalls + 1 && client.AddCalls[^1] == recoveryTarget,
+                "Browser recovery submits exactly one add command bound to the selected expired account ID.");
             Click(Button(Cards(window)[1], client.State.Accounts[1].Profile.Email!)); Pump(20);
             Check(window.CurrentPage == "switch", "A transient network error still permits explicit switch preflight.");
             var targetId = client.State.Accounts[1].Profile.Id;
@@ -382,6 +387,7 @@ internal static class RefreshResetChecks
     {
         public event Action? Changed;
         public readonly List<Guid?> Calls = [];
+        public readonly List<Guid?> AddCalls = [];
         public int RemovalCalls, OtherCalls;
         private TaskCompletionSource? pending;
         private TaskCompletionSource? resetPending;
@@ -397,6 +403,7 @@ internal static class RefreshResetChecks
             State = AccountSnapshot.Empty with { Accounts = rows, ActiveAccountID = rows[0].Profile.Id, Settings = new("simplifiedChinese") };
         }
         public Task CommandAsync(string command, Guid? accountID = null, bool? value = null, string? language = null) {
+            if (command == "add") { AddCalls.Add(accountID); OtherCalls++; return Task.CompletedTask; }
             if (command == "remove") {
                 RemovalCalls++;
                 Publish(State with { Accounts = State.Accounts.Where(row => row.Profile.Id != accountID).ToArray(), ActiveAccountID = State.ActiveAccountID == accountID ? null : State.ActiveAccountID });

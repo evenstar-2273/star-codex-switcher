@@ -19,7 +19,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private readonly object commandStateLock = new();
     private volatile string? activeCommand;
     private readonly SemaphoreSlim loginCancellation = new(1);
-    private TimeSpan loginCancellationTimeout = TimeSpan.FromSeconds(3);
+    private TimeSpan loginCancellationTimeout = TimeSpan.FromSeconds(8);
     private IAccountRuntime? core;
     private GuardedSwitch? transaction;
     private bool busy;
