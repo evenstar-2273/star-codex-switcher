@@ -16,6 +16,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private readonly IDesktopOperations desktop;
     private readonly ILoginValidator validator;
     private readonly SemaphoreSlim commands = new(1);
+    private readonly object commandStateLock = new();
     private volatile string? activeCommand;
     private readonly SemaphoreSlim loginCancellation = new(1);
     private TimeSpan loginCancellationTimeout = TimeSpan.FromSeconds(3);
@@ -23,7 +24,8 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private GuardedSwitch? transaction;
     private bool busy;
     private int foregroundWaiting;
-    private bool cancellingLogin;
+    private volatile bool cancellingLogin;
+    private volatile bool stopping;
     private string? error;
     private readonly bool directUsageEnabled;
     private readonly CancellationTokenSource usageLifetime = new();
@@ -82,7 +84,13 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         // The host owns the only periodic clock. A fresh revision, rather than
         // a second cache-age timer, means its configured interval is respected.
         // Startup reads also cover the first host cycle, which can finish later.
-        if (!commands.Wait(0)) return;
+        TaskCompletionSource completion;
+        lock (commandStateLock) {
+            if (stopping || cancellingLogin || Volatile.Read(ref foregroundWaiting) != 0 || !commands.Wait(0)) return;
+            activeCommand = "automaticQuotaRefresh";
+            completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            automaticUsageTask = completion.Task;
+        }
         var handedOff = false;
         try {
             if (usageLifetime.IsCancellationRequested || cancellingLogin || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount) return;
@@ -91,19 +99,22 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             var ids = core.State.Accounts.Select(row => row.Profile.Id).Where(id => !resetNeedsRefresh.ContainsKey(id) &&
                 (!directUsage.ContainsKey(id) || !usageRevisions.TryGetValue(id, out var consumed) || consumed < revision)).ToArray();
             if (ids.Length == 0) return;
-            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            automaticUsageTask = completion.Task; activeCommand = "automaticQuotaRefresh"; handedOff = true;
+            handedOff = true;
             _ = ReadAutomaticUsageAsync(ids, revision, Volatile.Read(ref usageGeneration), completion, initialFastRead: hostRevision == 0);
-        } finally { if (!handedOff) commands.Release(); }
+        } finally { if (!handedOff) CompleteAutomaticCommand(completion); }
     }
     private async Task ReadAutomaticUsageAsync(Guid[] ids, long revision, int generation, TaskCompletionSource completion, bool initialFastRead) {
         try {
             await Task.WhenAll(ids.Select(id => ReadRevisionAsync(id, revision, generation, initialFastRead: initialFastRead, quiet: true)));
         }
         finally {
-            activeCommand = null; commands.Release(); completion.TrySetResult();
+            CompleteAutomaticCommand(completion);
             if (!usageLifetime.IsCancellationRequested) context.Post(_ => Notify(), null);
         }
+    }
+    private void CompleteAutomaticCommand(TaskCompletionSource completion) {
+        lock (commandStateLock) { activeCommand = null; commands.Release(); }
+        completion.TrySetResult();
     }
     private async Task ReadRevisionAsync(Guid id, long revision, int generation, bool reconcileReset = false, bool initialFastRead = false, bool quiet = false) {
         await RefreshDirectUsageAsync(id, generation, reconcileReset: reconcileReset, quiet: quiet);
@@ -309,11 +320,10 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         // Cancellation must reach the login even when its start acknowledgement
         // or another ordinary command is still waiting on the shared transport.
         if (command == "cancelAdd") { await CancelAddingAccountAsync(); return; }
-        if (cancellingLogin || !await EnterCommandsAsync()) {
+        if (cancellingLogin || !await EnterCommandsAsync(command)) {
             if (intervalSetting) throw new IOException("请等待当前账号操作完成后再保存刷新间隔。");
             return;
         }
-        activeCommand = command;
         try {
             if (core == null) throw new IOException("Account core is unavailable. Restart the app.");
             if (command == "add") Notify();
@@ -363,20 +373,46 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
                 }
             } else if (transportError != null) { throw transportError; }
         } finally {
-            transaction?.Dispose(); transaction = null; busy = false; activeCommand = null; Volatile.Write(ref foregroundWaiting, 0); commands.Release(); Notify();
+            transaction?.Dispose(); transaction = null; busy = false; ExitCommands(); Notify();
         }
     }
 
-    private async Task<bool> EnterCommandsAsync()
+    private async Task<bool> EnterCommandsAsync(string command)
     {
-        if (commands.Wait(0)) return true;
-        if (activeCommand != "automaticQuotaRefresh") return commands.Wait(0);
-        // Background reads remain serialized with writes, but do not disable the UI.
-        // An explicit user command may wait for that read instead of being lost.
-        if (Interlocked.CompareExchange(ref foregroundWaiting, 1, 0) != 0) return false;
+        Task wait;
+        lock (commandStateLock) {
+            if (stopping || cancellingLogin || Volatile.Read(ref foregroundWaiting) != 0) return false;
+            if (commands.Wait(0)) { activeCommand = command; return true; }
+            if (activeCommand != "automaticQuotaRefresh") return false;
+            // Ownership and the single foreground reservation change together.
+            // No click can observe a held gate without its background owner, and
+            // another command cannot steal a gate released to this waiter.
+            Volatile.Write(ref foregroundWaiting, 1);
+            wait = commands.WaitAsync(usageLifetime.Token);
+        }
         Notify();
-        try { await commands.WaitAsync(usageLifetime.Token); return true; }
-        catch { Volatile.Write(ref foregroundWaiting, 0); Notify(); throw; }
+        try {
+            await wait;
+            lock (commandStateLock) {
+                if (stopping || cancellingLogin) {
+                    Volatile.Write(ref foregroundWaiting, 0); commands.Release(); return false;
+                }
+                activeCommand = command;
+                Volatile.Write(ref foregroundWaiting, 0);
+            }
+            return true;
+        } catch (OperationCanceledException) when (usageLifetime.IsCancellationRequested) {
+            lock (commandStateLock) { Volatile.Write(ref foregroundWaiting, 0); }
+            return false;
+        } catch {
+            lock (commandStateLock) { Volatile.Write(ref foregroundWaiting, 0); }
+            Notify(); throw;
+        }
+    }
+    private void ExitCommands() {
+        lock (commandStateLock) {
+            activeCommand = null; Volatile.Write(ref foregroundWaiting, 0); commands.Release();
+        }
     }
 
     private async Task CancelAddingAccountAsync()
@@ -415,7 +451,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
 
     private async Task<ImportResult> ImportAsync(Func<LoginCredential[]> parse)
     {
-        if (!await EnterCommandsAsync()) throw new IOException("请等待当前操作完成。 / Another operation is running.");
+        if (!await EnterCommandsAsync("import")) throw new IOException("请等待当前操作完成。 / Another operation is running.");
         try {
             if (core?.State.IsMutating == true || core?.State.IsAddingAccount == true)
                 throw new IOException("请先完成或取消登录操作。 / Finish the current login first.");
@@ -425,7 +461,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             await StopCoreAsync();
             try { return AccountImport.CommitResolved(dataPath, activeHome, credentials); }
             finally { await InitializeAsync(); }
-        } finally { busy = false; Volatile.Write(ref foregroundWaiting, 0); commands.Release(); Notify(); }
+        } finally { busy = false; ExitCommands(); Notify(); }
     }
 
     public Task CloseAsync(CancellationToken ct) => transaction?.CloseAsync(ct)
@@ -433,7 +469,9 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     public Task OpenAsync(CancellationToken ct) => transaction?.OpenAsync(ct)
         ?? Task.FromException(new IOException("A validated switch is required."));
     public async ValueTask DisposeAsync() {
-        usageLifetime.Cancel(); if (automaticUsageTask is { } automatic) await automatic;
+        Task? automatic;
+        lock (commandStateLock) { stopping = true; automatic = automaticUsageTask; }
+        usageLifetime.Cancel(); if (automatic != null) await automatic;
         // A pending add can own commands until the host stops. Cancel it first;
         // taking that gate before stopping the login would deadlock shutdown.
         await CancelAddingAccountAsync();

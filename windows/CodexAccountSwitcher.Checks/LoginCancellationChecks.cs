@@ -9,6 +9,7 @@ internal static class LoginCancellationChecks
     public static async Task<int> RunAsync(string? host)
     {
         try {
+            await CommandCoordinationChecks.VerifyAsync();
             await CheckManagedAsync();
             if (host != null) await CheckHostAsync(Path.GetFullPath(host));
             Console.WriteLine($"PASS: {passed} login cancellation assertions; priority cancellation, bounded recovery, late replies, isolated original credentials.");

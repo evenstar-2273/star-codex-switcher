@@ -35,7 +35,7 @@ $setup=Join-Path $OutputDirectory ("Star-Codex-Switcher-$releaseVersion-Setup-x6
 if($LASTEXITCODE -ne 0){throw 'NSIS build failed'}
 $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($setup+'.sha256',"$hash  $([IO.Path]::GetFileName($setup))`n",[Text.UTF8Encoding]::new($false))
-$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：支持删除当前使用的账号，二次确认后仅移除工具保存的账号，保留 Codex 当前登录和任务。已删除账号不会被刷新或重启自动加回，可获取本地账号、授权或导入恢复。“保存当前登录”已移入添加账号弹窗并更名为“获取本地账号”。定时额度刷新改为静默后台更新，手动刷新保留旋转动效。登录失效显示醒目红色提示并禁用切换，提供恢复登录入口；保留已有账号、设置和安装位置。"}
+$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：支持删除当前使用的账号，二次确认后仅移除工具保存的账号，保留 Codex 当前登录和任务。已删除账号不会被刷新或重启自动加回，可获取本地账号、授权或导入恢复。“保存当前登录”已移入添加账号弹窗并更名为“获取本地账号”。定时额度刷新改为静默后台更新，手动刷新保留旋转动效。登录失效显示醒目红色提示并禁用切换，提供恢复登录入口。修复后台刷新交接时操作偶发无响应，排队授权仍可取消；保留已有账号、设置和安装位置。"}
 [IO.File]::WriteAllText((Join-Path $OutputDirectory 'update-installed.json'),($feed|ConvertTo-Json)+"`n",[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $projectRoot 'windows\artifacts\latest-installed-build.txt'),$publish)
 Write-Output $setup
