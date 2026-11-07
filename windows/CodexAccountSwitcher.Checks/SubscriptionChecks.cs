@@ -10,7 +10,10 @@ internal static class SubscriptionChecks
     public static async Task<int> RunAsync()
     {
         try {
-            ParseChecks(); PlanChecks(); await HttpChecks(); await LoginPeriodChecks(); await GuardedChecks(); await GuardedLoginPeriodChecks();
+            Console.WriteLine("Subscription checks: parser and plan selection."); ParseChecks(); PlanChecks();
+            Console.WriteLine("Subscription checks: synthetic HTTP and login period."); await HttpChecks(); await LoginPeriodChecks();
+            Console.WriteLine("Subscription checks: guarded reconciliation."); await GuardedChecks();
+            Console.WriteLine("Subscription checks: guarded login period."); await GuardedLoginPeriodChecks();
             Console.WriteLine($"PASS: {passed} subscription selection/date/HTTP/cache assertions (synthetic only, GET fixtures)."); return 0;
         } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
     }
@@ -117,8 +120,9 @@ internal static class SubscriptionChecks
             await using var client = new GuardedAccountClient(Path.Combine(root, "data"), Path.Combine(root, "active"), () => runtime,
                 new Credits(), (_, _) => Task.FromResult(new Usage(81, Now.AddDays(4), null, null, 2, null, "prolite")), new Validator(), subscription);
             await client.InitializeAsync();
-            Require(client.State.Accounts[0].Subscription == null && client.State.Accounts[0].SubscriptionStatus == "checking", "An expired JWT snapshot is hidden while the official lookup is pending.");
-            pending.SetResult(new("workspace", "pro", freshUntil, "subscriptions"));
+            try {
+                Require(client.State.Accounts[0].Subscription == null && client.State.Accounts[0].SubscriptionStatus == "checking", "An expired JWT snapshot is hidden while the official lookup is pending.");
+            } finally { pending.TrySetResult(new("workspace", "pro", freshUntil, "subscriptions")); }
             await Until(() => client.State.Accounts[0].SubscriptionStatus == "verified");
             var current = client.State.Accounts[0]; var checkedAt = current.Subscription!.LastChecked;
             Require(current.Subscription.ActiveUntil == freshUntil && current.Subscription.IsVerified && current.Subscription.Source == "subscriptions" && current.PlanType == "prolite", "Live expiry is verified while generic Pro keeps the official Pro 100 usage tier.");
@@ -153,10 +157,16 @@ internal static class SubscriptionChecks
             var sawOldExpired = false;
             lateClient.Changed += () => { if (lateClient.State.Accounts.FirstOrDefault()?.Subscription?.ActiveUntil < DateTimeOffset.UtcNow) sawOldExpired = true; };
             await lateClient.InitializeAsync(); await Until(() => lookupCalls == 1);
-            await lateClient.CommandAsync("refresh", lateId);
-            Require(lookupCalls == 1 && lateClient.State.IsMutating, "Manual refresh does not overlap an earlier pending scheduled billing lookup.");
-            File.AppendAllText(Path.Combine(lateProfile, "auth.json"), "\n"); lateRuntime.Publish(lateState);
-            oldLookup.SetResult(new("workspace", "pro", actualPast, "subscriptions"));
+            Require(!lateClient.State.IsMutating, "The pending scheduled billing lookup remains silent until a manual refresh is requested.");
+            Console.WriteLine("Subscription checks: queued refresh after a pending response for replaced credentials.");
+            var refresh = lateClient.CommandAsync("refresh", lateId);
+            try {
+                Require(!refresh.IsCompleted && lookupCalls == 1 && lateClient.State.IsMutating, "Manual refresh waits for the earlier scheduled billing lookup without overlapping it.");
+                await lateClient.CommandAsync("refresh", lateId).WaitAsync(TimeSpan.FromSeconds(10));
+                Require(lookupCalls == 1, "Repeated refresh cannot queue another billing lookup behind the existing foreground waiter.");
+                File.AppendAllText(Path.Combine(lateProfile, "auth.json"), "\n"); lateRuntime.Publish(lateState);
+            } finally { oldLookup.TrySetResult(new("workspace", "pro", actualPast, "subscriptions")); }
+            await refresh.WaitAsync(TimeSpan.FromSeconds(10));
             await Until(() => !lateClient.State.IsMutating && lookupCalls == 2);
             Require(!sawOldExpired && lateClient.State.Accounts[0].Subscription?.ActiveUntil == freshUntil && lateClient.State.Accounts[0].PlanType == "prolite",
                 "An old in-flight billing result cannot overwrite renewed expiry or incorrectly turn the badge free.");
