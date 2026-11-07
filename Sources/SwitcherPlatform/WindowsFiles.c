@@ -65,7 +65,7 @@ uint32_t switcher_check_path(const char *utf8_path) {
 }
 
 uint32_t switcher_sha256(const void *bytes, size_t count, unsigned char *digest) {
-    if (!digest || count > MAXULONG || (!bytes && count)) return ERROR_INVALID_PARAMETER;
+    if (!digest || count > UINT32_MAX || (!bytes && count)) return ERROR_INVALID_PARAMETER;
     BCRYPT_ALG_HANDLE algorithm = NULL;
     NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0);
     if (status < 0) return ERROR_GEN_FAILURE;
