@@ -46,23 +46,52 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Swift cancellation checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- login-cancel ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Authorization cancellation checks failed.' }
-      - name: Check guarded login, import and recovery
+      - name: Check storage directory compatibility
+        timeout-minutes: 5
         shell: pwsh
         run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- storage-paths ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Storage directory compatibility checks failed.' }
+      - name: Check current account removal
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- account-removal ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Current account removal checks failed.' }
+      - name: Check guarded login, import and recovery
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- guarded ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Guarded checks failed.' }
+      - name: Check plan metadata
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- plans
           if ($LASTEXITCODE -ne 0) { throw 'Plan metadata checks failed.' }
+      - name: Check reset credits
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- reset-credits
           if ($LASTEXITCODE -ne 0) { throw 'Reset credit checks failed.' }
+      - name: Check subscription metadata
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- subscriptions
           if ($LASTEXITCODE -ne 0) { throw 'Subscription checks failed.' }
+      - name: Check quota refresh scheduling
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- quota-refresh ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Quota refresh scheduling checks failed.' }
+      - name: Check quota network error handling
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- quota-network
           if ($LASTEXITCODE -ne 0) { throw 'Quota network error checks failed.' }
       - name: Check WPF with synthetic accounts

@@ -11,7 +11,10 @@ internal static class ResetCreditsChecks
     public static async Task<int> RunAsync()
     {
         try {
-            ParseChecks(); await HttpChecks(); await ClientChecks(); await RefreshChecks();
+            Console.WriteLine("Reset checks: parser cases."); ParseChecks();
+            Console.WriteLine("Reset checks: synthetic HTTP cases."); await HttpChecks();
+            Console.WriteLine("Reset checks: guarded reset transactions."); await ClientChecks();
+            Console.WriteLine("Reset checks: refresh reconciliation."); await RefreshChecks();
             Console.WriteLine($"PASS: {passed} reset-credit HTTP/parser/transaction assertions (synthetic credentials, no network or real consume)."); return 0;
         } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
     }
@@ -21,11 +24,9 @@ internal static class ResetCreditsChecks
         using var slowNetwork = new ClientFixture("prolite");
         var pendingUsage = new TaskCompletionSource<Usage>(TaskCreationOptions.RunContinuationsAsynchronously);
         await using (var client = slowNetwork.Client((_, ct) => pendingUsage.Task.WaitAsync(ct))) {
-            var localPlanPublished = false;
-            client.Changed += () => { if (client.State.Accounts.FirstOrDefault()?.PlanType == "prolite") localPlanPublished = true; };
-            await client.InitializeAsync(); await Until(() => localPlanPublished);
+            await client.InitializeAsync(); await Until(() => client.State.Accounts.FirstOrDefault()?.PlanType == "prolite");
             Require(client.State.Accounts[0].PlanType == "prolite" && slowNetwork.Credits.Reads == 0 && !pendingUsage.Task.IsCompleted,
-                "JWT plan is published while the first HTTP request is still pending, ahead of stale cached host plan.");
+                "JWT plan is available while the first HTTP request is still pending, ahead of stale cached host plan and without requiring an intermediate refresh event.");
             pendingUsage.SetResult(slowNetwork.Usage(72) with { PlanType = "future-official-plan" });
             await Until(() => client.State.Accounts[0].PlanType == "future-official-plan");
             Require(client.State.Accounts[0].PlanType == "future-official-plan", "New official metadata supersedes the immediate JWT hint.");
@@ -150,11 +151,13 @@ internal static class ResetCreditsChecks
             Require(client.State.Accounts[0].Usage?.RemainingPercent == 42 && client.State.Accounts[0].PlanType == "future-plan", "Fresh official quota/plan override stale Swift snapshots.");
             var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); credits.Gate = gate;
             var reset = client.CommandAsync("resetQuota", fixture.Id);
-            await Until(() => credits.Consumes == 1);
-            Require(client.State.IsMutating && client.State.Accounts.Length == 1 && fixture.Running == 0, "Reset pauses the host, preserves visible accounts and holds busy state.");
-            await client.CommandAsync("resetQuota", fixture.Id);
-            Require(credits.Consumes == 1, "Overlapping confirmation cannot issue a second reset.");
-            gate.SetResult(); await reset;
+            try {
+                await Until(() => credits.Consumes == 1);
+                Require(client.State.IsMutating && client.State.Accounts.Length == 1 && fixture.Running == 0, "Reset pauses the host, preserves visible accounts and holds busy state.");
+                await client.CommandAsync("resetQuota", fixture.Id).WaitAsync(TimeSpan.FromSeconds(10));
+                Require(credits.Consumes == 1, "Overlapping confirmation cannot issue a second reset.");
+            } finally { gate.TrySetResult(); }
+            await reset.WaitAsync(TimeSpan.FromSeconds(10));
             Require(fixture.Starts == 2 && fixture.Stops == 1 && fixture.Running == 1, "The host restarts after reset.");
             Require(client.State.Accounts[0].Usage?.ResetCreditsRemaining == 2 && client.State.Accounts[0].Usage?.RemainingPercent == 100, "Success refreshes both balance and quota.");
             fixture.LastRuntime!.Publish(fixture.Snapshot);
@@ -183,13 +186,22 @@ internal static class ResetCreditsChecks
 
         using var stale = new ClientFixture();
         var delayed = new TaskCompletionSource<Usage>(TaskCreationOptions.RunContinuationsAsynchronously); var reads = 0;
-        await using (var client = stale.Client((_, _) => ++reads == 1 ? delayed.Task : Task.FromResult(stale.Usage(100)))) {
+        Console.WriteLine("Reset checks: reset queued behind a silent scheduled read.");
+        await using (var client = stale.Client((_, ct) => ++reads == 1 ? delayed.Task.WaitAsync(ct) : Task.FromResult(stale.Usage(100)))) {
             await client.InitializeAsync(); await Until(() => reads == 1);
-            await client.CommandAsync("resetQuota", stale.Id);
-            Require(stale.Credits.Consumes == 0 && client.State.IsMutating, "An in-flight scheduled read holds the account operation gate and cannot race a reset.");
-            delayed.SetResult(stale.Usage(4)); await Until(() => !client.State.IsMutating);
-            await client.CommandAsync("resetQuota", stale.Id);
-            Require(client.State.Accounts[0].Usage?.RemainingPercent == 100 && client.State.Accounts[0].Usage?.ResetCreditsRemaining == 2, "Reset after the earlier read completes publishes fresh quota and the consumed credit balance.");
+            Require(!client.State.IsMutating, "An in-flight scheduled read is silent until a foreground operation is requested.");
+            var reset = client.CommandAsync("resetQuota", stale.Id);
+            try {
+                await Until(() => client.State.IsMutating);
+                Require(!reset.IsCompleted && stale.Credits.Consumes == 0 && stale.Running == 1,
+                    "The requested reset waits behind the scheduled read without stopping the host or consuming a credit.");
+                await client.CommandAsync("resetQuota", stale.Id).WaitAsync(TimeSpan.FromSeconds(10));
+                Require(stale.Credits.Consumes == 0, "A repeated reset cannot queue a second consume while the first reset waits.");
+            } finally { delayed.TrySetResult(stale.Usage(4)); }
+            await reset.WaitAsync(TimeSpan.FromSeconds(10));
+            Require(stale.Credits.Consumes == 1 && !client.State.IsMutating && client.State.Accounts[0].Usage?.RemainingPercent == 100 && client.State.Accounts[0].Usage?.ResetCreditsRemaining == 2,
+                "The queued reset runs once after the read completes and publishes fresh quota and the consumed credit balance.");
+            Require(File.ReadAllBytes(stale.ActiveCredential).SequenceEqual(stale.OriginalBytes), "Queued reset preserves the active login file.");
         }
         using var failedRestart = new ClientFixture { FailSecondStart = true };
         await using (var client = failedRestart.Client()) {
