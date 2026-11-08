@@ -33,6 +33,20 @@ internal static class RefreshResetChecks
         try {
             CountdownRules();
             window.Show(); window.Activate(); Pump(60);
+            var beforeFree = client.State;
+            var monthly = OfficialUsageReader.Parse("""
+                {"plan_type":"free","rate_limit":{"primary_window":{"limit_window_seconds":2592000,"used_percent":0,"reset_after_seconds":2591940}}}
+                """, Now);
+            client.Publish(beforeFree with { Accounts = [beforeFree.Accounts[0] with {
+                Usage = monthly, PlanType = "free", Subscription = new(Now.AddHours(5), Now), SubscriptionStatus = "login_snapshot"
+            }] });
+            Pump(40);
+            var freeLabels = All<TextBlock>(Cards(window).Single()).Select(label => label.Text).ToArray();
+            Check(freeLabels.Contains("FREE") && freeLabels.Contains("5 周剩余") && freeLabels.Contains("100%") &&
+                freeLabels.Any(label => label.Contains("剩余 5 小时")) && !freeLabels.Contains("7 天剩余"),
+                "The free account displays its monthly allowance independently of its five-hour subscription countdown.");
+            Capture(window, Path.Combine(output, "free-monthly-allowance.png"));
+            client.Publish(beforeFree); Pump(40);
             ColorPresentation(app, window, native, output);
             CountdownPresentation(window, () => displayNow = displayNow.AddMinutes(1), output);
             RefreshInteractions(window, client, output);

@@ -348,7 +348,7 @@ public sealed class MainWindow : Window
         var name = Text(title, 18, bold: true); name.ToolTip = title; details.Children.Add(name);
         if (current) { var active = Text(L("当前使用", "Current"), 13, bold: true); active.SetResourceReference(TextBlock.ForegroundProperty, "AccentInk"); active.Margin = new Thickness(0, 4, 0, 0); details.Children.Add(active); }
         Grid.SetColumn(details, 1); grid.Children.Add(details);
-        var plan = AccountVisuals.PlanBadge(row.Usage?.PlanType ?? row.PlanType, chinese: Chinese);
+        var plan = AccountVisuals.PlanBadge(row.PlanType ?? row.Usage?.PlanType, chinese: Chinese);
         var badgeText = Text(plan.Label, 12, bold: true); badgeText.SetResourceReference(TextBlock.ForegroundProperty, "PlanForeground_" + plan.Key);
         var badgeInside = new Grid(); badgeText.Margin = new Thickness(10, 3, 10, 3); badgeInside.Children.Add(badgeText);
         var sheen = new Border { Height = 1, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(9, 1, 9, 0), Background = new SolidColorBrush(Color.FromArgb(105, 255, 255, 255)), IsHitTestVisible = false };
@@ -371,8 +371,7 @@ public sealed class MainWindow : Window
         var quotas = new StackPanel { Margin = new Thickness(0, 14, 0, 8), VerticalAlignment = VerticalAlignment.Center };
         var cachedQuota = !string.IsNullOrWhiteSpace(row.UsageError);
         if (row.Usage is { } usage) {
-            if (usage.FiveHourRemainingPercent.HasValue) quotas.Children.Add(UsageLine(L("5 小时剩余", "5 hours left"), usage.FiveHourRemainingPercent, usage.FiveHourResetsAt, false, cachedQuota));
-            quotas.Children.Add(UsageLine(L("7 天剩余", "7 days left"), usage.RemainingPercent, usage.ResetsAt, true, cachedQuota));
+            AddQuotaLines(quotas, usage, cachedQuota);
         } else {
             var missing = Text(row.UsageStatus == "idle" && string.IsNullOrWhiteSpace(row.UsageError) ? L("额度读取中…", "Loading quota…") : T("usage_unavailable"), 15, muted: true);
             missing.ToolTip = WindowsLocalization.Error(row.UsageError, State.Settings.Language); missing.TextWrapping = TextWrapping.Wrap; quotas.Children.Add(missing);
@@ -516,9 +515,24 @@ public sealed class MainWindow : Window
         Grid.SetColumn(label, 1); line.Children.Add(label);
         return line;
     }
-    private string ResetSchedule(Usage usage) => (usage.FiveHourRemainingPercent.HasValue
-        ? L("5 小时 ", "5h ") + (usage.FiveHourResetsAt?.ToLocalTime().ToString("MM-dd HH:mm") ?? T("unknown")) + "  ·  " : "") +
-        L("7 天 ", "7d ") + usage.ResetsAt.ToLocalTime().ToString("MM-dd HH:mm");
+    private string WindowLabel(long seconds)
+    {
+        if (seconds == 604800) return L("7 天", "7 days");
+        var (unit, label) = seconds >= 604800 ? (604800, L("周", "weeks"))
+            : seconds >= 86400 ? (86400, L("天", "days"))
+            : seconds >= 3600 ? (3600, L("小时", "hours")) : (60, L("分钟", "min"));
+        return $"{1 + (seconds - 1) / unit} {label}";
+    }
+
+    private void AddQuotaLines(StackPanel panel, Usage usage, bool cached = false)
+    {
+        foreach (var window in usage.DisplayWindows())
+            panel.Children.Add(UsageLine(WindowLabel(window.Seconds) + L("剩余", " left"),
+                window.RemainingPercent, window.ResetsAt, window.Seconds >= 86400, cached));
+    }
+
+    private string ResetSchedule(Usage usage) => string.Join("  ·  ", usage.DisplayWindows().Select(window =>
+        WindowLabel(window.Seconds) + " " + (window.ResetsAt?.ToLocalTime().ToString("MM-dd HH:mm") ?? T("unknown"))));
     private void Confirmation(StackPanel body)
     {
         if (target == null) return;
@@ -526,8 +540,7 @@ public sealed class MainWindow : Window
         content.Children.Add(AccountHeader(target, target.Profile.Id == State.ActiveAccountID));
         if (page == "resetQuota" && target.Usage is { } usage) {
             var quotas = new StackPanel { Margin = new Thickness(0, 22, 0, 12) };
-            if (usage.FiveHourRemainingPercent.HasValue) quotas.Children.Add(UsageLine(L("5 小时剩余", "5 hours left"), usage.FiveHourRemainingPercent, usage.FiveHourResetsAt));
-            quotas.Children.Add(UsageLine(L("7 天剩余", "7 days left"), usage.RemainingPercent, usage.ResetsAt, true)); content.Children.Add(quotas);
+            AddQuotaLines(quotas, usage); content.Children.Add(quotas);
             content.Children.Add(Rule());
             var credits = Text(L("可用重置次数：", "Available reset credits: ") + (usage.ResetCreditsRemaining?.ToString(CultureInfo.CurrentCulture) ?? T("unknown")), 16, bold: true);
             credits.Margin = new Thickness(0, 16, 0, 0); content.Children.Add(credits);

@@ -175,9 +175,9 @@ public partial class App : Application
         var state = client.State;
         var usage = state.Accounts.FirstOrDefault(row => row.Profile.Id == state.ActiveAccountID)?.Usage;
         if (usage == null) return null;
-        return state.Settings.StatusBarUsageWindow == "fiveHour"
-            ? usage.FiveHourRemainingPercent ?? usage.RemainingPercent
-            : usage.RemainingPercent;
+        var preferred = state.Settings.StatusBarUsageWindow == "fiveHour" ? 18000 : 604800;
+        var windows = usage.DisplayWindows();
+        return (windows.FirstOrDefault(window => window.Seconds == preferred) ?? windows.FirstOrDefault())?.RemainingPercent;
     }
     private void RefreshTrayIcon()
     {

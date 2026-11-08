@@ -4,9 +4,20 @@ namespace CodexAccountSwitcher.Core;
 
 // Wire DTOs only. Account policy and storage live in Sources/SwitcherCore.
 public sealed record Profile(Guid Id, string DisplayName, string? Email);
-public sealed record Usage(int RemainingPercent, DateTimeOffset ResetsAt,
+public sealed record QuotaWindow(long Seconds, int RemainingPercent, DateTimeOffset? ResetsAt);
+public sealed record Usage(int? RemainingPercent, DateTimeOffset? ResetsAt,
     int? FiveHourRemainingPercent, DateTimeOffset? FiveHourResetsAt, int? ResetCreditsRemaining = null,
-    DateTimeOffset? ResetCreditsExpireAt = null, string? PlanType = null);
+    DateTimeOffset? ResetCreditsExpireAt = null, string? PlanType = null, QuotaWindow[]? Windows = null)
+{
+    public IEnumerable<QuotaWindow> DisplayWindows()
+    {
+        if (Windows != null) return Windows;
+        var legacy = new List<QuotaWindow>(2);
+        if (FiveHourRemainingPercent is int shortQuota) legacy.Add(new(18000, shortQuota, FiveHourResetsAt));
+        if (RemainingPercent is int weekly) legacy.Add(new(604800, weekly, ResetsAt));
+        return legacy;
+    }
+}
 public sealed record SubscriptionSnapshot(DateTimeOffset ActiveUntil, DateTimeOffset LastChecked, string Source = "login_snapshot", bool IsVerified = false);
 public sealed record AccountRow(Profile Profile, string Initials, Usage? Usage, string? UsageError,
     string UsageStatus = "loaded", SubscriptionSnapshot? Subscription = null, string? PlanType = null,

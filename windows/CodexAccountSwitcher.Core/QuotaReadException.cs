@@ -5,8 +5,9 @@ namespace CodexAccountSwitcher.Core;
 
 // Only fixed, user-safe descriptions reach account snapshots. Never forward
 // transport exception strings, response bodies, or proxy credentials to the UI.
-public sealed class QuotaReadException(string message) : IOException(message)
+public sealed class QuotaReadException(string message, string? planType = null) : IOException(message)
 {
+    public string? PlanType { get; } = planType;
     public const string Connection = "无法连接额度服务，请检查网络或 VPN 后重试。";
     public const string ProxyConnection = "通过代理连接额度服务失败，请检查代理或更换节点后重试。";
     public const string LocalProxyUnavailable = "无法连接本地代理，请确认代理或 VPN 正在运行。";

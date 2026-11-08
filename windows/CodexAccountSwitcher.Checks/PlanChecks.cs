@@ -15,6 +15,17 @@ internal static class PlanChecks
                 var usage = OfficialUsageReader.Parse(Response(plan), now);
                 Require(usage.PlanType == plan && usage.FiveHourRemainingPercent == null, "Official plan and weekly-only quota are independent metadata.");
             }
+            var freeWindow = OfficialUsageReader.Parse("""
+                {"plan_type":"free","rate_limit":{"primary_window":{"limit_window_seconds":2592000,"used_percent":0,"reset_after_seconds":2591940}}}
+                """, now);
+            var monthly = freeWindow.DisplayWindows().Single();
+            Require(freeWindow.PlanType == "free" && monthly.Seconds == 2592000 && monthly.RemainingPercent == 100 &&
+                monthly.ResetsAt == now.AddSeconds(2591940) && freeWindow.RemainingPercent == null, "A free monthly window is not a weekly allowance.");
+            using (var missing = new OfficialUsageReader(new Handler("""{"plan_type":"free","rate_limit":{}}"""))) {
+                try { await missing.ReadAsync(Credential(null), default); throw new Exception("Expected missing quota."); }
+                catch (QuotaReadException error) { Require(error.PlanType == "free" && error.Message == QuotaReadException.MissingWindow,
+                    "Reading the plan does not require a valid quota window."); }
+            }
             Require(Credential(null, "pro500@example.test", "pro-200-file-name").PlanType == null,
                 "An email or account identifier must not be used to guess a plan.");
             Require(Credential(100).PlanType == null, "Malformed optional plan metadata must remain unknown.");

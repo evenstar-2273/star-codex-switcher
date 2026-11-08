@@ -54,7 +54,7 @@ public sealed class OfficialUsageReader : IDisposable
             var body = await response.Content.ReadAsStringAsync(deadline.Token);
             try { return Parse(body, DateTimeOffset.UtcNow); }
             catch (JsonException) { throw new QuotaReadException(QuotaReadException.InvalidResponse); }
-            catch (IOException) { throw new QuotaReadException(QuotaReadException.MissingWindow); }
+            catch (QuotaReadException) { throw; }
             catch (Exception ex) when (ex is InvalidOperationException or ArgumentOutOfRangeException or FormatException or OverflowException) {
                 throw new QuotaReadException(QuotaReadException.InvalidResponse);
             }
@@ -132,28 +132,35 @@ public sealed class OfficialUsageReader : IDisposable
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        if (!root.TryGetProperty("rate_limit", out var limits) || limits.ValueKind != JsonValueKind.Object) throw new IOException("服务尚未返回可识别的额度窗口。");
-        int? five = null, weekly = null; DateTimeOffset? fiveReset = null, weekReset = null;
+        var plan = root.TryGetProperty("plan_type", out var field) && field.ValueKind == JsonValueKind.String
+            ? field.GetString()?.Trim() : null;
+        if (string.IsNullOrEmpty(plan)) plan = null;
+        if (!root.TryGetProperty("rate_limit", out var limits) || limits.ValueKind != JsonValueKind.Object)
+            throw new QuotaReadException(QuotaReadException.MissingWindow, plan);
+
+        var windows = new List<QuotaWindow>(2);
         foreach (var name in new[] { "primary_window", "secondary_window" }) {
             if (!limits.TryGetProperty(name, out var window) || window.ValueKind != JsonValueKind.Object) continue;
-            if (!window.TryGetProperty("limit_window_seconds", out var duration) || !duration.TryGetInt64(out var seconds) ||
-                !window.TryGetProperty("used_percent", out var usedElement) || !usedElement.TryGetDouble(out var used) || !double.IsFinite(used)) continue;
+            if (!window.TryGetProperty("limit_window_seconds", out var duration) || duration.ValueKind != JsonValueKind.Number ||
+                !duration.TryGetInt64(out var seconds) || seconds <= 0 ||
+                !window.TryGetProperty("used_percent", out var value) || value.ValueKind != JsonValueKind.Number ||
+                !value.TryGetDouble(out var used) || !double.IsFinite(used)) continue;
             DateTimeOffset? reset = null;
-            if (window.TryGetProperty("reset_at", out var absolute) && absolute.TryGetInt64(out var epoch)) reset = DateTimeOffset.FromUnixTimeSeconds(epoch);
-            else if (window.TryGetProperty("reset_after_seconds", out var relative) && relative.TryGetInt64(out var after)) reset = now.AddSeconds(after);
-            if (!reset.HasValue) continue;
+            if (window.TryGetProperty("reset_at", out var absolute) && absolute.ValueKind == JsonValueKind.Number && absolute.TryGetInt64(out var epoch))
+                reset = DateTimeOffset.FromUnixTimeSeconds(epoch);
+            else if (window.TryGetProperty("reset_after_seconds", out var relative) && relative.ValueKind == JsonValueKind.Number && relative.TryGetInt64(out var after))
+                reset = now.AddSeconds(after);
             var remaining = (int)Math.Clamp(Math.Round(100 - used, MidpointRounding.AwayFromZero), 0, 100);
-            if (seconds == 18000) { five = remaining; fiveReset = reset; }
-            else if (seconds >= 6 * 86400 && seconds <= 8 * 86400) { weekly = remaining; weekReset = reset; }
+            windows.Add(new(seconds, remaining, reset));
         }
-        if (weekly == null || weekReset == null) throw new IOException("服务未返回周额度；不会将未知额度显示为 0。");
+        if (windows.Count == 0) throw new QuotaReadException(QuotaReadException.MissingWindow, plan);
         int? credits = null;
         if (root.TryGetProperty("rate_limit_reset_credits", out var credit) && credit.ValueKind == JsonValueKind.Object &&
             credit.TryGetProperty("available_count", out var count) && count.TryGetInt32(out var available) && available >= 0) credits = available;
-        var plan = root.TryGetProperty("plan_type", out var planField) && planField.ValueKind == JsonValueKind.String
-            ? planField.GetString()?.Trim() : null;
-        return new Usage(weekly.Value, weekReset.Value, five, fiveReset, credits,
-            PlanType: string.IsNullOrEmpty(plan) ? null : plan);
+        var weekly = windows.Find(window => window.Seconds == 604800);
+        var five = windows.Find(window => window.Seconds == 18000);
+        return new Usage(weekly?.RemainingPercent, weekly?.ResetsAt, five?.RemainingPercent, five?.ResetsAt,
+            credits, PlanType: plan, Windows: windows.ToArray());
     }
     public void Dispose() => http.Dispose();
 }

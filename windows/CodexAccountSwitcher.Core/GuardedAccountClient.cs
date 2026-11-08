@@ -29,7 +29,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private string? error;
     private readonly bool directUsageEnabled;
     private readonly CancellationTokenSource usageLifetime = new();
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (Usage? Usage, string? Error, DateTimeOffset At, bool UnknownCredits)> directUsage = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (Usage? Usage, string? Error, DateTimeOffset At, bool UnknownCredits, string? ReportedPlan)> directUsage = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, long> usageRevisions = new();
     private Task? automaticUsageTask;
     private volatile bool initialCycleMayReset;
@@ -62,8 +62,9 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
                     var actualExpiry = status == "verified" && snapshot?.IsVerified == true ? snapshot.ActiveUntil : (DateTimeOffset?)null;
                     return current with {
                         Subscription = snapshot, SubscriptionStatus = status, SubscriptionError = subscription?.Error,
-                        PlanType = SubscriptionPlan.Resolve(subscription?.PlanType, entry.Usage?.PlanType,
-                            planHints.GetValueOrDefault(row.Profile.Id) ?? current.Usage?.PlanType ?? row.PlanType, actualExpiry)
+                        PlanType = SubscriptionPlan.Resolve(subscription?.Status == "verified" ? subscription.PlanType : null, entry.ReportedPlan ?? entry.Usage?.PlanType,
+                            subscription?.PlanType ?? planHints.GetValueOrDefault(row.Profile.Id) ?? current.Usage?.PlanType ?? row.PlanType, actualExpiry)
+                            ?? (entry.Usage?.Windows is { Length: > 0 } ? "free" : null)
                     };
                 }).ToArray()
             };
@@ -138,11 +139,13 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             // The token's optional plan is local metadata: show it before either network request.
             if (!quiet) context.Post(_ => { if (!usageLifetime.IsCancellationRequested) Changed?.Invoke(); }, null);
             subscriptionTask = RefreshSubscriptionAsync(id, credential, generation, force: reconcileReset, quiet: quiet);
+            string? reportedPlan = null;
             Usage? fresh = null; string? failure = null; var creditsConfirmed = false;
             try { fresh = await usageReader(credential, usageLifetime.Token); }
             catch (OperationCanceledException) when (usageLifetime.IsCancellationRequested) { throw; }
-            catch (QuotaReadException ex) { failure = ex.Message; }
+            catch (QuotaReadException ex) { failure = ex.Message; reportedPlan = ex.PlanType; }
             catch { failure = "读取额度失败，请检查网络后重试。"; }
+            reportedPlan ??= fresh != null ? fresh.PlanType : directUsage.GetValueOrDefault(id).ReportedPlan;
             fresh ??= directUsage.GetValueOrDefault(id).Usage ?? State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage;
             try {
                 var credits = await resetCredits.ReadAsync(credential, usageLifetime.Token);
@@ -153,7 +156,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             catch { failure ??= "额度已读取，但重置次数明细暂时不可用。"; }
             lock (usageStateLock) {
                 if (generation == usageGeneration && File.Exists(path) && File.ReadAllBytes(path).SequenceEqual(credential.Bytes)) {
-                    directUsage[id] = (fresh, failure, DateTimeOffset.UtcNow, afterReset && !creditsConfirmed);
+                    directUsage[id] = (fresh, failure, DateTimeOffset.UtcNow, afterReset && !creditsConfirmed, reportedPlan);
                     if (creditsConfirmed && (afterReset || reconcileReset)) resetNeedsRefresh.TryRemove(id, out _);
                 }
             }
@@ -162,7 +165,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         } catch (OperationCanceledException) when (usageLifetime.IsCancellationRequested) { return null; }
         catch {
             const string message = "读取账号信息失败，请检查登录文件、网络或重新授权。";
-            lock (usageStateLock) { if (generation == usageGeneration) directUsage[id] = (null, message, DateTimeOffset.UtcNow, afterReset); }
+            lock (usageStateLock) { if (generation == usageGeneration) directUsage[id] = (null, message, DateTimeOffset.UtcNow, afterReset, null); }
             return message;
         } finally {
             if (subscriptionTask != null) await subscriptionTask;
@@ -297,14 +300,14 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             succeeded = true;
             resetNeedsRefresh[id] = 0;
             // Do not show the old count while the confirmed result is being refreshed.
-            directUsage[id] = (account.Usage, null, DateTimeOffset.UtcNow, true);
+            directUsage[id] = (account.Usage, null, DateTimeOffset.UtcNow, true, account.PlanType);
             var refreshError = await RefreshDirectUsageAsync(id, generation, afterReset: true);
             if (refreshError != null) error = "重置请求已成功，但最新额度或次数尚未完整读取，请刷新后核对。";
         } catch (Exception ex) {
             if (ex is not ResetCreditException || ((ResetCreditException)ex).OutcomeUncertain) resetNeedsRefresh[id] = 0;
             var knownCount = (ex as ResetCreditException)?.AvailableCount;
             directUsage[id] = (account.Usage is { } prior ? prior with { ResetCreditsRemaining = knownCount, ResetCreditsExpireAt = null } : null,
-                "请刷新次数和额度核对。", DateTimeOffset.UtcNow, knownCount == null);
+                "请刷新次数和额度核对。", DateTimeOffset.UtcNow, knownCount == null, account.PlanType);
             error = ex is ResetCreditException safe ? safe.Message : hostStopped ? "重置未能完成，请刷新次数和额度核对后再操作。" : "未能停止账号服务，本次未执行重置。请重新打开工具。";
         } finally {
             try { if (hostStopped) await InitializeAsync(); }
