@@ -329,7 +329,7 @@ internal static class QuotaRefreshChecks
     }
     private static void AgeDirectCache(GuardedAccountClient client)
     {
-        var cache = (ConcurrentDictionary<Guid, (Usage? Usage, string? Error, DateTimeOffset At, bool UnknownCredits)>)
+        var cache = (ConcurrentDictionary<Guid, (Usage? Usage, string? Error, DateTimeOffset At, bool UnknownCredits, string? ReportedPlan)>)
             typeof(GuardedAccountClient).GetField("directUsage", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(client)!;
         foreach (var item in cache.ToArray()) cache[item.Key] = item.Value with { At = DateTimeOffset.UtcNow.AddDays(-1) };
     }
