@@ -243,11 +243,11 @@ public partial class App : Application
         foreach (var plan in new[] { "free", "plus", "pro100", "pro200", "pro500", "team", "business", "enterprise", "edu", "go", "unknown" }) {
             var badge = AccountVisuals.PlanBadge(plan, dark);
             var basis = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(badge.Background);
-            static System.Windows.Media.Color Mix(System.Windows.Media.Color value, byte destination, double weight) => System.Windows.Media.Color.FromRgb(
-                (byte)Math.Round(value.R * (1 - weight) + destination * weight), (byte)Math.Round(value.G * (1 - weight) + destination * weight), (byte)Math.Round(value.B * (1 - weight) + destination * weight));
+            var highlight = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(badge.Highlight ?? badge.Background);
+            var shade = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(badge.Shade ?? badge.Background);
             Resources["PlanBackground_" + plan] = new LinearGradientBrush(new GradientStopCollection {
-                new(Mix(basis, 255, plan == "pro500" ? 0.07 : 0.20), 0), new(basis, 0.52), new(Mix(basis, 0, 0.04), 1)
-            }, new System.Windows.Point(0, 0), new System.Windows.Point(0, 1));
+                new(shade, 0), new(basis, 0.28), new(highlight, 0.46), new(basis, 0.66), new(shade, 1)
+            }, new System.Windows.Point(0, 0), new System.Windows.Point(1, 0.7));
             Resources["PlanForeground_" + plan] = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(badge.Foreground));
             Resources["PlanBorder_" + plan] = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(badge.Border));
         }

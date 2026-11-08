@@ -1,6 +1,7 @@
 # 发布约束
 
 - 后续 Git 提交信息统一使用中文，标题与正文应说明实际改动及必要的验证结果。
+- 用户要求纯样式变更只做本地测试后直接发布，不等待远端 CI；应完成本地编译、深浅主题与布局验证、安装包自检及公开下载校验，发布说明如实标注本地验证。功能或构建逻辑变更继续按原验证流程。
 - 涉及程序或构建的变更，先完成本地修改、编译打包和相应验证，再正常提交并通过 CI。保持版本号、更新说明、安装包、SHA-256 校验文件和更新清单一致；不以文档更新代替实际验证。
 - 按用户新增的固定最新版直链要求，GitHub Release 改为四项资产：带版本号的安装包、对应 `.sha256`、`update-installed.json`，以及同内容的固定名 `Star-Codex-Switcher-Setup-x64.exe`。此规则替代此前仅三项资产的约束；源码仍使用 GitHub 自带下载，不另传源码包。
 - 发布 Latest 前，必须准备固定名 EXE 并确认其大小与 SHA-256 和版本包一致。GitHub 固定直链为 `https://github.com/evenstar-2273/star-codex-switcher/releases/latest/download/Star-Codex-Switcher-Setup-x64.exe`；自动更新清单仍指向具体版本包。

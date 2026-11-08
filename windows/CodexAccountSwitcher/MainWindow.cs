@@ -350,9 +350,27 @@ public sealed class MainWindow : Window
         Grid.SetColumn(details, 1); grid.Children.Add(details);
         var plan = AccountVisuals.PlanBadge(row.PlanType ?? row.Usage?.PlanType, chinese: Chinese);
         var badgeText = Text(plan.Label, 12, bold: true); badgeText.SetResourceReference(TextBlock.ForegroundProperty, "PlanForeground_" + plan.Key);
-        var badgeInside = new Grid(); badgeText.Margin = new Thickness(10, 3, 10, 3); badgeInside.Children.Add(badgeText);
-        var sheen = new Border { Height = 1, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(9, 1, 9, 0), Background = new SolidColorBrush(Color.FromArgb(105, 255, 255, 255)), IsHitTestVisible = false };
-        badgeInside.Children.Add(sheen);
+        var badgeContent = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(9, 3, 9, 3) };
+        if (plan.Key.StartsWith("pro", StringComparison.Ordinal)) {
+            var emblem = new System.Windows.Shapes.Path {
+                Width = 10, Height = 10, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 5, 0), StrokeThickness = 1.15, IsHitTestVisible = false,
+                Data = Geometry.Parse(plan.Key switch {
+                    "pro500" => "M1,3 L3.5,5 L6,1 L8.5,5 L11,3 L10,10 L2,10 Z M2,8 L10,8",
+                    "pro200" => "M6,0.5 L11.5,6 L6,11.5 L0.5,6 Z M6,3 L9,6 L6,9 L3,6 Z",
+                    _ => "M6,0.5 L11.5,6 L6,11.5 L0.5,6 Z"
+                })
+            };
+            emblem.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "PlanForeground_" + plan.Key);
+            badgeContent.Children.Add(emblem);
+        }
+        badgeContent.Children.Add(badgeText);
+        var badgeInside = new Grid(); badgeInside.Children.Add(badgeContent);
+        if (plan.Key is "plus" or "pro100" or "pro200" or "pro500") {
+            var sheen = new Border { Height = 1, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(10, 1, 10, 0),
+                Background = new LinearGradientBrush(Colors.Transparent, Color.FromArgb(105, 255, 255, 255), 0), IsHitTestVisible = false };
+            badgeInside.Children.Add(sheen);
+        }
         var badge = new Border { Child = badgeInside, CornerRadius = new CornerRadius(12), BorderThickness = new Thickness(1),
             VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(10, 2, 0, 0) };
         badge.SetResourceReference(Border.BackgroundProperty, "PlanBackground_" + plan.Key); badge.SetResourceReference(Border.BorderBrushProperty, "PlanBorder_" + plan.Key);

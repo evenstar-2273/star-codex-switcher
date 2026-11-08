@@ -3,7 +3,7 @@ using System.Linq;
 
 namespace CodexAccountSwitcher;
 
-public sealed record PlanBadgeStyle(string Key, string Label, string Background, string Foreground, string Border);
+public sealed record PlanBadgeStyle(string Key, string Label, string Background, string Foreground, string Border, string? Highlight = null, string? Shade = null);
 
 // Presentation only: colors never change account eligibility or consume reset credits.
 public static class AccountVisuals
@@ -31,18 +31,17 @@ public static class AccountVisuals
             "unknown" => chinese ? "未知" : "Unknown", _ => key.ToUpperInvariant()
         };
         var colors = (key, dark) switch {
-            ("plus", false) => ("#C7F5E5", "#145742", "#7ED7B5"),
-            ("plus", true) => ("#A8ECCF", "#145742", "#7ED7B5"),
-            ("pro100", false) => ("#DFE9F7", "#30425D", "#AABCD3"),
-            ("pro100", true) => ("#CDDEF4", "#30425D", "#AABCD3"),
-            ("pro200", false) => ("#F6E2B1", "#654516", "#D5B573"),
-            ("pro200", true) => ("#EAD299", "#654516", "#D5B573"),
-            ("pro500", false) => ("#735784", "#FFF0CF", "#B69A67"),
-            ("pro500", true) => ("#634875", "#FFF0CF", "#B69A67"),
-            (_, false) => ("#EEF0F3", "#596372", "#CCD2DA"),
-            (_, true) => ("#D5DEE9", "#445165", "#A5B4C7")
+            ("free", false) => ("#EEF1F5", "#596575", "#CDD5DF", "#EEF1F5", "#EEF1F5"),
+            ("free", true) => ("#293546", "#C5CFDC", "#526075", "#293546", "#293546"),
+            ("plus", false) => ("#B9EBD8", "#14513F", "#72BDA2", "#D9F8EC", "#A1DEC7"),
+            ("plus", true) => ("#A8E3CD", "#124936", "#70C5A6", "#D0F4E5", "#8DD5B9"),
+            ("pro100", _) => ("#2854A8", "#F5F9FF", "#85B8FF", "#3B65B5", "#17366D"),
+            ("pro200", _) => ("#E8C67D", "#4B3310", "#C29543", "#FFF0C2", "#D5AB5A"),
+            ("pro500", _) => ("#44336B", "#FFF1CE", "#D7B875", "#604681", "#241E40"),
+            (_, false) => ("#EEF0F3", "#596372", "#CCD2DA", "#EEF0F3", "#EEF0F3"),
+            (_, true) => ("#293546", "#C5CFDC", "#526075", "#293546", "#293546")
         };
-        return new(key, label, colors.Item1, colors.Item2, colors.Item3);
+        return new(key, label, colors.Item1, colors.Item2, colors.Item3, colors.Item4, colors.Item5);
     }
 
     public static string QuotaTone(int? percent) => percent switch {
