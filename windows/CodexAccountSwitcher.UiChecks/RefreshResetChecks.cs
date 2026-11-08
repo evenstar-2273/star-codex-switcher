@@ -38,7 +38,7 @@ internal static class RefreshResetChecks
                 {"plan_type":"free","rate_limit":{"primary_window":{"limit_window_seconds":2592000,"used_percent":0,"reset_after_seconds":2591940}}}
                 """, Now);
             client.Publish(beforeFree with { Accounts = [beforeFree.Accounts[0] with {
-                Usage = monthly, PlanType = "free", Subscription = new(Now.AddHours(5), Now), SubscriptionStatus = "login_snapshot"
+                Usage = monthly, PlanType = SubscriptionPlan.Resolve("chatgptplusplan", monthly.PlanType, "plus"), Subscription = new(Now.AddHours(5), Now, "accounts_check", true), SubscriptionStatus = "verified"
             }] });
             Pump(40);
             var freeLabels = All<TextBlock>(Cards(window).Single()).Select(label => label.Text).ToArray();

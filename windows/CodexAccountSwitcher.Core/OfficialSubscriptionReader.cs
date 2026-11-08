@@ -157,19 +157,19 @@ public static class SubscriptionPlan
         DateTimeOffset? verifiedActiveUntil = null, DateTimeOffset? now = null)
     {
         if (verifiedActiveUntil <= (now ?? DateTimeOffset.UtcNow)) return "free";
-        if (string.IsNullOrWhiteSpace(subscriptionPlan)) return usagePlan ?? tokenPlan;
-        var tier = Tier(subscriptionPlan);
-        if (tier == 200 && Tier(usagePlan) != 0) return usagePlan;
-        return subscriptionPlan;
+        // Billing entitlements describe the subscription period; the quota response
+        // describes the current effective plan and can already be FREE during that period.
+        if (!string.IsNullOrWhiteSpace(usagePlan)) return usagePlan.Trim();
+        return NormalizeBillingPlan(subscriptionPlan) ?? NormalizeBillingPlan(tokenPlan);
     }
-    private static int Tier(string? value)
+    private static string? NormalizeBillingPlan(string? value)
     {
-        var key = new string((value ?? "").Where(c => !char.IsWhiteSpace(c) && c is not '-' and not '_').ToArray()).ToLowerInvariant();
-        return key switch {
-            "prolite" or "pro100" or "pro5x" or "codexpro5x" or "chatgptprolite" => 100,
-            "pro" or "pro200" or "pro20x" or "codexpro20x" or "chatgptpro" => 200,
-            "promax" or "pro500" or "chatgptpromax" => 500,
-            _ => 0
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return value.Trim().ToLowerInvariant() switch {
+            "chatgptfreeplan" => "free", "chatgptplusplan" => "plus",
+            "chatgptproplan" => "pro", "chatgptteamplan" => "team",
+            "chatgptbusinessplan" => "business", "chatgptenterpriseplan" => "enterprise",
+            _ => value.Trim()
         };
     }
 }

@@ -12,6 +12,7 @@ internal static class SubscriptionChecks
         try {
             Console.WriteLine("Subscription checks: parser and plan selection."); ParseChecks(); PlanChecks();
             Console.WriteLine("Subscription checks: synthetic HTTP and login period."); await HttpChecks(); await LoginPeriodChecks();
+            Console.WriteLine("Subscription checks: free quota with paid billing metadata."); await GuardedFreePlanChecks();
             Console.WriteLine("Subscription checks: guarded reconciliation."); await GuardedChecks();
             Console.WriteLine("Subscription checks: guarded login period."); await GuardedLoginPeriodChecks();
             Console.WriteLine($"PASS: {passed} subscription selection/date/HTTP/cache assertions (synthetic only, GET fixtures)."); return 0;
@@ -53,8 +54,11 @@ internal static class SubscriptionChecks
             Require(SubscriptionPlan.Resolve(generic, "prolite", "plus") == "prolite", "Generic subscription Pro does not hide the official Pro 100 quota tier.");
             Require(SubscriptionPlan.Resolve(generic, "promax", "plus") == "promax", "Generic subscription Pro retains the official Pro 500 quota tier.");
         }
-        Require(SubscriptionPlan.Resolve("promax", "prolite", "plus") == "promax", "An explicit subscription tier takes priority over quota metadata.");
-        Require(SubscriptionPlan.Resolve("free", "promax", "plus") == "free" && SubscriptionPlan.Resolve("plus", "prolite", "pro") == "plus", "A real subscription change to free/plus overrides old Pro metadata.");
+        Require(SubscriptionPlan.Resolve("promax", "prolite", "plus") == "prolite", "The current quota tier takes priority over billing metadata.");
+        Require(SubscriptionPlan.Resolve("free", "promax", "plus") == "promax" && SubscriptionPlan.Resolve("plus", "prolite", "pro") == "prolite", "Current quota plans are independent of billing plan strings.");
+        Require(SubscriptionPlan.Resolve("chatgptplusplan", "free", "plus") == "free", "Free quota cannot be overwritten by a paid billing entitlement.");
+        Require(SubscriptionPlan.Resolve("chatgptplusplan", null, "free") == "plus", "Billing aliases remain usable when current quota metadata is absent.");
+        Require(SubscriptionPlan.Resolve("chatgptplusplan", "future-plan", "free") == "future-plan", "An unknown current plan is not guessed from a known billing alias.");
         Require(SubscriptionPlan.Resolve(null, "future-plan", "plus") == "future-plan", "Unknown official plan strings remain unknown rather than reverting to JWT.");
         Require(SubscriptionPlan.Resolve("pro", "prolite", null, Now.AddSeconds(-1), Now) == "free", "Only a verified actual past expiry lowers the effective plan to free.");
         Require(SubscriptionPlan.Resolve("pro", "prolite", null, null, Now) == "prolite", "Unverified or missing expiry cannot lower a paid plan to free.");
@@ -103,6 +107,39 @@ internal static class SubscriptionChecks
             try { await reader.ReadAsync(credential, default); throw new Exception("Failed fallback accepted."); }
             catch (SubscriptionReadException) { Require(true, "A failed fallback cannot return the expired check date as a verified subscription."); }
         }
+    }
+    private static async Task GuardedFreePlanChecks()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "switcher-free-plan-check-" + Guid.NewGuid());
+        var id = Guid.NewGuid(); var credential = Credential(null, null);
+        var profile = Path.Combine(root, "data", "accounts", id.ToString().ToUpperInvariant()); Directory.CreateDirectory(profile);
+        File.WriteAllBytes(Path.Combine(profile, "auth.json"), credential.Bytes);
+        var until = DateTimeOffset.UtcNow.AddHours(5);
+        var billing = OfficialSubscriptionReader.ParseAccountCheck(JsonSerializer.Serialize(new {
+            accounts = new[] { new { account = new { account_id = "workspace", plan_type = "free" },
+                entitlement = new { subscription_plan = "chatgptplusplan", expires_at = until.ToString("O") } } }
+        }), "workspace");
+        var usage = OfficialUsageReader.Parse("""
+            {"plan_type":"free","rate_limit":{"primary_window":{"limit_window_seconds":2592000,"used_percent":0,"reset_after_seconds":2591940}}}
+            """, DateTimeOffset.UtcNow);
+        var state = AccountSnapshot.Empty with { Accounts = [new(new(id, "Fixture", "fixture@example.test"), "F", null, null)] };
+        var pending = new TaskCompletionSource<SubscriptionLookup>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reader = new Reader((_, ct) => pending.Task.WaitAsync(ct));
+        try {
+            await using var client = new GuardedAccountClient(Path.Combine(root, "data"), Path.Combine(root, "active"), () => new Runtime(state),
+                new Credits(), (_, _) => Task.FromResult(usage), new Validator(), reader);
+            await client.InitializeAsync();
+            await Until(() => client.State.Accounts[0].Usage?.Windows?.Length == 1);
+            Require(client.State.Accounts[0].PlanType == "free", "The current quota plan must be FREE before billing returns.");
+            pending.SetResult(billing);
+            await Until(() => client.State.Accounts[0].SubscriptionStatus == "verified");
+            var row = client.State.Accounts[0];
+            Require(row.PlanType == "free" && row.Subscription?.ActiveUntil == until && row.Usage?.Windows?[0].Seconds == 2592000,
+                "A later chatgptplusplan entitlement must preserve the FREE quota plan, monthly window and independent subscription date.");
+            await client.CommandAsync("refresh", id);
+            Require(client.State.Accounts[0].PlanType == "free", "Manual refresh must not restore the billing plan over the FREE quota plan.");
+            Require(File.ReadAllBytes(Path.Combine(profile, "auth.json")).SequenceEqual(credential.Bytes), "Reading plans must never change saved credentials.");
+        } finally { SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root); }
     }
     private static async Task GuardedChecks()
     {
