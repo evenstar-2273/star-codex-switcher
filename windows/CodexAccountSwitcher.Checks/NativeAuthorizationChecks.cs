@@ -38,10 +38,15 @@ internal static class NativeAuthorizationChecks
         Check(credential.AccountID == "native-test" && handler.Calls == 1, "Valid callback exchanges one code and reads account identity.");
         using var cancel = new CancellationTokenSource();
         var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var pending = auth.LoginAsync((uri, ct) => { opened.SetResult(); return Task.CompletedTask; }, cancel.Token);
+        Uri? cancelledUrl = null;
+        var pending = auth.LoginAsync((uri, ct) => { cancelledUrl = uri; opened.SetResult(); return Task.CompletedTask; }, cancel.Token);
         await opened.Task; cancel.Cancel();
         try { await pending.WaitAsync(TimeSpan.FromSeconds(1)); throw new Exception("Cancellation ignored"); }
         catch (OperationCanceledException) { Check(true, "Cancelling closes local authorization without a process timeout."); }
+        var releasedPort = new Uri(BrowserAuthorization.Query(cancelledUrl!.Query)["redirect_uri"]).Port;
+        using var nextListener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, releasedPort);
+        nextListener.Start();
+        Check(true, "The callback port can immediately be reused after cancellation.");
     }
     private static async Task HostAsync(string host)
     {
@@ -82,12 +87,22 @@ internal static class NativeAuthorizationChecks
             await client.CommandAsync("switch", id);
             Check(client.State.ActiveAccountID == id && desktop.Opened == 1 && client.State.Error == null, "A fresh unsigned-in desktop switches using the saved native authorization without a CLI.");
             var activeBytes = File.ReadAllBytes(Path.Combine(active, "auth.json"));
+            await client.CommandAsync("refresh");
+            quota.RejectOnce = true;
+            await client.CommandAsync("refresh");
+            var savedPath = Path.Combine(data, "accounts", id.ToString().ToUpperInvariant(), "auth.json");
+            var renewed = File.ReadAllBytes(savedPath);
+            await client.CommandAsync("refresh");
+            Check(tokenHandler.RefreshCalls == 2 && File.ReadAllBytes(savedPath).SequenceEqual(renewed) && !renewed.SequenceEqual(activeBytes),
+                "Refreshing the active account preserves the renewed credential against the desktop's older local copy.");
             quota.Block = true;
             var refresh = client.CommandAsync("refresh"); await Until(() => quota.Waiting);
             await client.CommandAsync("remove", id).WaitAsync(TimeSpan.FromSeconds(2)); await refresh;
             Check(client.State.Accounts.Length == 0 && client.State.Error == null, "Deletion cancels a blocked native network read and completes locally.");
             Check(!Directory.GetDirectories(Path.Combine(data, "accounts")).Any(), "Local account files are removed after deletion.");
             Check(File.ReadAllBytes(Path.Combine(active, "auth.json")).SequenceEqual(activeBytes), "Deleting the current saved account preserves the desktop's active login.");
+            await client.CommandAsync("refresh");
+            Check(client.State.Accounts.Length == 0, "A later refresh cannot restore the deliberately removed active account.");
         } finally {
             Environment.SetEnvironmentVariable("CODEX_CLI_PATH", priorCli);
             SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root);

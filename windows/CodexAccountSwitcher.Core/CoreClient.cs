@@ -18,6 +18,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
     private readonly IDesktopOperations desktop;
     private readonly Func<Uri, CancellationToken, Task> openBrowser;
     private readonly string profilesPath;
+    private readonly string activeCredentialPath;
     private readonly ConcurrentDictionary<int, CancellationTokenSource> platformCancellation = new();
     private readonly ConcurrentDictionary<int, Task> platformTasks = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> profileWrites = new();
@@ -45,6 +46,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
         }
         SecureFiles.RejectLinks(dataPath); SecureFiles.RejectLinks(activeHome);
         profilesPath = Path.Combine(dataPath, "accounts");
+        activeCredentialPath = Path.Combine(activeHome, "auth.json");
         this.desktop = desktop ?? new DesktopController(ct => DesktopController.DiscoverAsync(null, ct));
         this.openBrowser = openBrowser ?? OpenBrowserAsync;
         context = SynchronizationContext.Current ?? new SynchronizationContext();
@@ -191,7 +193,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
                             try {
                                 if (deletedAccounts.ContainsKey(profileId) || !File.Exists(credentialPath) || !LoginCredential.Read(credentialPath).Bytes.SequenceEqual(login.Bytes))
                                     throw new IOException("账号凭据已变化，已停止写回，请刷新重试。");
-                                SecureFiles.AtomicWrite(credentialPath, refreshed.Bytes);
+                                PersistRefreshedCredential(credentialPath, login, refreshed);
                             } finally { writeGate.Release(); }
                             login = refreshed;
                             usage = await usageReader.ReadAsync(login, cancellation.Token);
@@ -238,6 +240,27 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
     }
 
     private static string? WireDate(DateTimeOffset? value) => value?.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+    private void PersistRefreshedCredential(string path, LoginCredential previous, LoginCredential refreshed)
+    {
+        if (File.Exists(activeCredentialPath)) {
+            var live = LoginCredential.Read(activeCredentialPath);
+            if (live.AccountID == refreshed.AccountID) {
+                static string Hash(byte[] bytes) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+                var markerPath = Path.Combine(Path.GetDirectoryName(path)!, "reauthorization-live.json");
+                SecureFiles.RejectLinks(markerPath);
+                var liveHash = Hash(live.Bytes); var oldHash = Hash(previous.Bytes);
+                var markers = new List<CredentialMarker>();
+                if (File.Exists(markerPath)) {
+                    var saved = JsonSerializer.Deserialize<CredentialMarker[]>(File.ReadAllBytes(markerPath), AccountSnapshot.JsonOptions) ?? [];
+                    markers.AddRange(saved.Where(m => m.PreviousLive == liveHash && m.SavedCredential == oldHash).Take(1));
+                }
+                markers.Add(new(liveHash, Hash(refreshed.Bytes)));
+                SecureFiles.AtomicWrite(markerPath, JsonSerializer.SerializeToUtf8Bytes(markers, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+            }
+        }
+        SecureFiles.AtomicWrite(path, refreshed.Bytes);
+    }
+    private sealed record CredentialMarker(string PreviousLive, string SavedCredential);
     private string ProfilePath(JsonElement message)
     {
         var profile = new Uri(message.GetProperty("url").GetString()!);

@@ -20,10 +20,7 @@ internal sealed class BrowserAuthorization(HttpMessageHandler? handler = null, i
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromMinutes(10));
         var token = deadline.Token;
-        using var listener = new TcpListener(IPAddress.Loopback, port);
-        listener.Server.ExclusiveAddressUse = true;
-        try { listener.Start(); }
-        catch (SocketException) { throw new IOException("登录回调端口被占用，请先取消其他正在进行的授权，再重试。"); }
+        using var listener = Listen(port);
         var actualPort = ((IPEndPoint)listener.LocalEndpoint).Port;
         var redirect = $"http://localhost:{actualPort}/auth/callback";
         var verifier = Base64Url(RandomNumberGenerator.GetBytes(32));
@@ -78,6 +75,16 @@ internal sealed class BrowserAuthorization(HttpMessageHandler? handler = null, i
         catch (HttpRequestException) { throw new IOException("授权网络连接失败，请检查网络或代理后重试。"); }
         catch (JsonException) { throw new IOException("授权服务返回的数据无法识别，请重新授权。"); }
         finally { listener.Stop(); }
+    }
+    private static TcpListener Listen(int port)
+    {
+        foreach (var candidate in port == 1455 ? new[] { 1455, 1457 } : new[] { port }) {
+            var listener = new TcpListener(IPAddress.Loopback, candidate);
+            listener.Server.ExclusiveAddressUse = true;
+            try { listener.Start(); return listener; }
+            catch (SocketException) { listener.Stop(); listener.Dispose(); }
+        }
+        throw new IOException("登录回调端口被占用，请先取消其他正在进行的授权，再重试。");
     }
     internal async Task<LoginCredential> RefreshAsync(LoginCredential previous, CancellationToken ct)
     {

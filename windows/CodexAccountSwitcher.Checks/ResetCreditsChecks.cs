@@ -76,6 +76,10 @@ internal static class ResetCreditsChecks
         var payload = """{"data":{"available_count":2,"credits":[{"id":"later","status":"available","expires_at":"2026-12-01T00:00:00Z"},{"id":"early","state":"available","expires_at":"2026-11-07T00:00:00Z"},{"id":"old","expires_at":"2020-01-01T00:00:00Z"},{"id":"used","status":"redeemed","expires_at":"2026-11-06T13:00:00Z"}]}}""";
         var parsed = OfficialResetCredits.Parse(payload, Now);
         Require(parsed.AvailableCount == 2 && parsed.EarliestExpiry == DateTimeOffset.Parse("2026-11-07T00:00:00Z"), "Nested count and earliest available expiry.");
+        Require(parsed.Credits?.Length == 2 && parsed.Credits.All(c => c.ResetType == "codexRateLimits"), "Available card identities and expiry are retained for native automatic reset scheduling.");
+        var otherType = OfficialResetCredits.Parse("""{"credits":[{"id":"other","type":"futureProduct","status":"available","expires_at":"2026-12-01T00:00:00Z"}]}""", Now);
+        Require(otherType.Credits?.Single().ResetType == "futureProduct", "Other reset types cannot be promoted to Codex automatic resets.");
+        Require(OfficialResetCredits.Parse("""{"available_count":0,"credits":[{"id":"stale","expires_at":"2026-12-01T00:00:00Z"}]}""", Now).Credits?.Length == 0, "A zero server count prevents stale records from authorizing automatic reset.");
         Require(OfficialResetCredits.Parse("{}", Now).AvailableCount == null, "Missing detail is unknown, never zero.");
         Require(OfficialResetCredits.Parse("{\"credits\":[]}", Now).AvailableCount == 0, "An explicitly empty list is known zero.");
         Require(OfficialResetCredits.Parse("{\"credits\":[{},null]}", Now).AvailableCount == null, "Unrecognizable records do not create zero or available credits.");

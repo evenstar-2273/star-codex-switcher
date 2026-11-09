@@ -69,7 +69,7 @@ public sealed class OfficialResetCredits : IResetCreditService, IDisposable
         var available = await ReadAsync(credential, ct);
         if (available.AvailableCount is not > 0)
             throw new ResetCreditException(available.AvailableCount == 0 ? "没有可用的重置次数。" : "无法确认可用重置次数，未执行重置。请先刷新。", availableCount: available.AvailableCount);
-        if (creditId != null && available.Credits?.Any(c => c.Id == creditId && c.Status == "available" && c.ExpiresAt > now()) != true)
+        if (creditId != null && available.Credits?.Any(c => c.Id == creditId && c.Status == "available" && c.ResetType == "codexRateLimits" && c.ExpiresAt > now()) != true)
             throw new ResetCreditException("待重置的卡已不可用，未执行重置，请刷新后核对。");
         ct.ThrowIfCancellationRequested();
         using var request = Request(HttpMethod.Post, Endpoint + "/consume", credential);
@@ -118,13 +118,15 @@ public sealed class OfficialResetCredits : IResetCreditService, IDisposable
                     if (!recognizable || status is not (null or "available" or "active" or "unredeemed")) { complete = false; continue; }
                     derived++;
                     var id = Property(entry, "id", "credit_id", "creditId");
+                    var type = Property(entry, "type", "reset_type", "resetType");
+                    var resetType = type is { ValueKind: JsonValueKind.String } knownType ? knownType.GetString()! : "codexRateLimits";
                     if (id is { ValueKind: JsonValueKind.String } identifier && !string.IsNullOrWhiteSpace(identifier.GetString()))
-                        banked.Add(new(identifier.GetString()!, "available", "codexRateLimits", expiry));
+                        banked.Add(new(identifier.GetString()!, "available", resetType, expiry));
                     if (expiry != null && (earliest == null || expiry < earliest)) earliest = expiry;
                 }
                 if (count == null && complete) count = derived;
             }
-            if (count == 0) earliest = null;
+            if (count == 0) { earliest = null; banked.Clear(); }
             return new(count, earliest, records is { ValueKind: JsonValueKind.Array } ? banked.ToArray() : null);
         } catch (Exception ex) when (ex is JsonException or FormatException or InvalidOperationException or ArgumentOutOfRangeException) {
             throw new ResetCreditException("重置次数响应格式无法识别，未将未知次数显示为 0。");

@@ -267,6 +267,9 @@ open class AccountController {
     private func performAddAccount(replacingAccountID: UUID?) async {
         let id = UUID()
         do {
+            // Finish cancellation of native reads before a renewed credential can replace an existing one.
+            if localDeletionWithoutWaiting { await cancelUsageRefresh() }
+            try Task.checkCancellation()
             let home = try await store.createProfileDirectory(id: id)
             try Task.checkCancellation()
             let identity = try await codex.login(profileHome: home)
