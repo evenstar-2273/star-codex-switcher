@@ -11,6 +11,7 @@ if (args.FirstOrDefault() == "plans") return await PlanChecks.RunAsync();
 if (args.FirstOrDefault() == "reset-credits") return await ResetCreditsChecks.RunAsync();
 if (args.FirstOrDefault() == "subscriptions") return await SubscriptionChecks.RunAsync();
 if (args.FirstOrDefault() == "login-cancel") return await LoginCancellationChecks.RunAsync(args.ElementAtOrDefault(1));
+if (args.FirstOrDefault() == "native-authorization") return await NativeAuthorizationChecks.RunAsync(args.ElementAtOrDefault(1));
 if (args.FirstOrDefault() == "login-reauthorization") return await LoginReauthorizationChecks.RunAsync(args.ElementAtOrDefault(1));
 if (args.FirstOrDefault() == "command-coordination") return await CommandCoordinationChecks.RunAsync();
 if (args.FirstOrDefault() == "quota-refresh") return await QuotaRefreshChecks.RunAsync(args.ElementAtOrDefault(1));

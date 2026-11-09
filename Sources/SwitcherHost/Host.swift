@@ -8,19 +8,41 @@ private struct Request: Decodable, Sendable {
     var value: Bool?
     var language: String?
     var error: String?
+    var result: String?
 }
 
 private struct DesktopAdapter: DesktopControlling {
     let host: Host
-    func closeDesktop() async throws { try await host.platform("closeDesktop") }
-    func reopenDesktop() async throws { try await host.platform("reopenDesktop") }
+    func closeDesktop() async throws { _ = try await host.platform("closeDesktop") }
+    func reopenDesktop() async throws { _ = try await host.platform("reopenDesktop") }
+}
+
+private struct NativeAuthorizationClient: AccountClient {
+    let host: Host
+    func readIdentity(profileHome: URL) async throws -> AccountIdentity {
+        try await CredentialIdentity().readIdentity(profileHome: profileHome)
+    }
+    func login(profileHome: URL) async throws -> AccountIdentity {
+        _ = try await host.platform("authorizeAccount", url: profileHome)
+        return try await readIdentity(profileHome: profileHome)
+    }
+    func readWeeklyUsage(profileHome: URL) async throws -> WeeklyUsage {
+        let json = try await host.platform("readAccountUsage", url: profileHome)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(WeeklyUsage.self, from: Data((json ?? "").utf8))
+    }
+    func consumeResetCredit(profileHome: URL, creditID: String, idempotencyKey: String) async throws -> ResetCreditOutcome {
+        _ = try await host.platform("consumeAccountCredit", url: profileHome, creditID: creditID, requestID: idempotencyKey)
+        return .reset
+    }
 }
 
 @MainActor
 private final class Host {
     private var controller: AccountController?
     private var nextID = 0
-    private var pending: [Int: CheckedContinuation<Void, any Error>] = [:]
+    private var pending: [Int: CheckedContinuation<String?, any Error>] = [:]
     private var commands: [Int: Task<Void, Never>] = [:]
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -28,12 +50,13 @@ private final class Host {
         return encoder
     }()
 
-    func platform(_ method: String, url: URL? = nil) async throws {
+    func platform(_ method: String, url: URL? = nil, creditID: String? = nil, requestID: String? = nil) async throws -> String? {
         nextID += 1
         let id = nextID
-        try await withTaskCancellationHandler {
+        return try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            let result: String?
+            do { result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String?, any Error>) in
                 guard !Task.isCancelled else {
                     continuation.resume(throwing: CancellationError())
                     return
@@ -41,12 +64,17 @@ private final class Host {
                 pending[id] = continuation
                 var message: [String: Any] = ["kind": "platform", "id": id, "method": method]
                 if let url { message["url"] = url.absoluteString }
+                if let creditID { message["creditID"] = creditID }
+                if let requestID { message["requestID"] = requestID }
                 send(message)
-            }
+            } } catch { if Task.isCancelled { throw CancellationError() }; throw error }
             try Task.checkCancellation()
+            return result
         } onCancel: {
             Task { @MainActor [weak self] in
-                self?.pending.removeValue(forKey: id)?.resume(throwing: CancellationError())
+                // Await the native cancellation acknowledgement before removing the profile.
+                if ["authorizeAccount", "readAccountUsage", "consumeAccountCredit"].contains(method) { self?.send(["kind": "platformCancel", "id": id]) }
+                else { self?.pending.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
             }
         }
     }
@@ -57,7 +85,7 @@ private final class Host {
             if request.command == "platformReply" {
                 guard let continuation = pending.removeValue(forKey: request.id) else { return }
                 if let error = request.error { continuation.resume(throwing: HostError.message(error)) }
-                else { continuation.resume() }
+                else { continuation.resume(returning: request.result) }
                 return
             }
             guard commands[request.id] == nil else { return }
@@ -80,14 +108,17 @@ private final class Host {
             guard controller == nil else { throw HostError.message("Already initialized.") }
             let environment = ProcessInfo.processInfo.environment
             let store = AccountStore(baseURL: environment["CODEX_SWITCHER_DATA_HOME"].map { URL(fileURLWithPath: $0) })
-            let codex = CodexClient(openBrowser: { [self] url in
+            let cli = CodexClient(openBrowser: { [self] url in
                 guard ["https", "http"].contains(url.scheme?.lowercased() ?? "") else {
                     throw HostError.message("Unsupported sign-in URL.")
                 }
-                try await platform("openBrowser", url: url)
+                _ = try await platform("openBrowser", url: url)
             })
+            let codex: any AccountClient = environment["CODEX_SWITCHER_NATIVE_AUTH"] == "1"
+                ? NativeAuthorizationClient(host: self) : cli
             let model = AccountController(store: store, codex: codex,
-                switchService: SwitchService(desktop: DesktopAdapter(host: self), store: store, codex: CredentialIdentity()))
+                switchService: SwitchService(desktop: DesktopAdapter(host: self), store: store, codex: CredentialIdentity()),
+                localDeletionWithoutWaiting: environment["CODEX_SWITCHER_NATIVE_AUTH"] == "1")
             controller = model
             model.onChange = { [weak self] in self?.sendSnapshot() }
             await model.startBackgroundUsageRefresh()

@@ -32,6 +32,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (Usage? Usage, string? Error, DateTimeOffset At, bool UnknownCredits, string? ReportedPlan)> directUsage = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, long> usageRevisions = new();
     private Task? automaticUsageTask;
+    private CancellationTokenSource? automaticUsageCancellation;
     private volatile bool initialCycleMayReset;
     private readonly SynchronizationContext context = SynchronizationContext.Current ?? new SynchronizationContext();
     private int usageGeneration;
@@ -91,6 +92,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             activeCommand = "automaticQuotaRefresh";
             completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
             automaticUsageTask = completion.Task;
+            automaticUsageCancellation = CancellationTokenSource.CreateLinkedTokenSource(usageLifetime.Token);
         }
         var handedOff = false;
         try {
@@ -101,12 +103,12 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
                 (!directUsage.ContainsKey(id) || !usageRevisions.TryGetValue(id, out var consumed) || consumed < revision)).ToArray();
             if (ids.Length == 0) return;
             handedOff = true;
-            _ = ReadAutomaticUsageAsync(ids, revision, Volatile.Read(ref usageGeneration), completion, initialFastRead: hostRevision == 0);
+            _ = ReadAutomaticUsageAsync(ids, revision, Volatile.Read(ref usageGeneration), completion, automaticUsageCancellation.Token, initialFastRead: hostRevision == 0);
         } finally { if (!handedOff) CompleteAutomaticCommand(completion); }
     }
-    private async Task ReadAutomaticUsageAsync(Guid[] ids, long revision, int generation, TaskCompletionSource completion, bool initialFastRead) {
+    private async Task ReadAutomaticUsageAsync(Guid[] ids, long revision, int generation, TaskCompletionSource completion, CancellationToken ct, bool initialFastRead) {
         try {
-            await Task.WhenAll(ids.Select(id => ReadRevisionAsync(id, revision, generation, initialFastRead: initialFastRead, quiet: true)));
+            await Task.WhenAll(ids.Select(id => ReadRevisionAsync(id, revision, generation, initialFastRead: initialFastRead, quiet: true, cancellation: ct)));
         }
         finally {
             CompleteAutomaticCommand(completion);
@@ -114,19 +116,20 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         }
     }
     private void CompleteAutomaticCommand(TaskCompletionSource completion) {
-        lock (commandStateLock) { activeCommand = null; commands.Release(); }
+        lock (commandStateLock) { automaticUsageCancellation?.Dispose(); automaticUsageCancellation = null; activeCommand = null; commands.Release(); }
         completion.TrySetResult();
     }
-    private async Task ReadRevisionAsync(Guid id, long revision, int generation, bool reconcileReset = false, bool initialFastRead = false, bool quiet = false) {
-        await RefreshDirectUsageAsync(id, generation, reconcileReset: reconcileReset, quiet: quiet);
+    private async Task ReadRevisionAsync(Guid id, long revision, int generation, bool reconcileReset = false, bool initialFastRead = false, bool quiet = false, CancellationToken? cancellation = null) {
+        await RefreshDirectUsageAsync(id, generation, reconcileReset: reconcileReset, quiet: quiet, cancellation: cancellation);
         // Failed reads count too: duplicate snapshots must not form a retry loop.
         lock (usageStateLock) { if (generation == usageGeneration) usageRevisions[id] = initialFastRead && initialCycleMayReset ? 0 : revision; }
     }
-    private async Task<string?> RefreshDirectUsageAsync(Guid id, int generation, bool afterReset = false, bool reconcileReset = false, bool quiet = false) {
+    private async Task<string?> RefreshDirectUsageAsync(Guid id, int generation, bool afterReset = false, bool reconcileReset = false, bool quiet = false, CancellationToken? cancellation = null) {
+        var ct = cancellation ?? usageLifetime.Token;
         var entered = false;
         Task? subscriptionTask = null;
         try {
-            await usageReads.WaitAsync(usageLifetime.Token); entered = true;
+            await usageReads.WaitAsync(ct); entered = true;
             if (generation != Volatile.Read(ref usageGeneration)) return null;
             var path = CredentialPath(id);
             var credential = LoginCredential.Read(path);
@@ -138,21 +141,21 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             }
             // The token's optional plan is local metadata: show it before either network request.
             if (!quiet) context.Post(_ => { if (!usageLifetime.IsCancellationRequested) Changed?.Invoke(); }, null);
-            subscriptionTask = RefreshSubscriptionAsync(id, credential, generation, force: reconcileReset, quiet: quiet);
+            subscriptionTask = RefreshSubscriptionAsync(id, credential, generation, force: reconcileReset, quiet: quiet, ct);
             string? reportedPlan = null;
             Usage? fresh = null; string? failure = null; var creditsConfirmed = false;
-            try { fresh = await usageReader(credential, usageLifetime.Token); }
-            catch (OperationCanceledException) when (usageLifetime.IsCancellationRequested) { throw; }
+            try { fresh = await usageReader(credential, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (QuotaReadException ex) { failure = ex.Message; reportedPlan = ex.PlanType; }
             catch { failure = "读取额度失败，请检查网络后重试。"; }
             reportedPlan ??= fresh != null ? fresh.PlanType : directUsage.GetValueOrDefault(id).ReportedPlan;
             fresh ??= directUsage.GetValueOrDefault(id).Usage ?? State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage;
             try {
-                var credits = await resetCredits.ReadAsync(credential, usageLifetime.Token);
+                var credits = await resetCredits.ReadAsync(credential, ct);
                 creditsConfirmed = credits.AvailableCount.HasValue;
                 fresh ??= State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage;
                 if (fresh != null) fresh = fresh with { ResetCreditsRemaining = credits.AvailableCount ?? fresh.ResetCreditsRemaining, ResetCreditsExpireAt = credits.EarliestExpiry };
-            } catch (OperationCanceledException) when (usageLifetime.IsCancellationRequested) { throw; }
+            } catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch { failure ??= "额度已读取，但重置次数明细暂时不可用。"; }
             lock (usageStateLock) {
                 if (generation == usageGeneration && File.Exists(path) && File.ReadAllBytes(path).SequenceEqual(credential.Bytes)) {
@@ -162,7 +165,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             }
             if (afterReset && !creditsConfirmed) failure ??= "重置次数尚未确认，请刷新后核对。";
             return failure;
-        } catch (OperationCanceledException) when (usageLifetime.IsCancellationRequested) { return null; }
+        } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return null; }
         catch {
             const string message = "读取账号信息失败，请检查登录文件、网络或重新授权。";
             lock (usageStateLock) { if (generation == usageGeneration) directUsage[id] = (null, message, DateTimeOffset.UtcNow, afterReset, null); }
@@ -172,7 +175,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             if (entered) usageReads.Release();
         }
     }
-    private async Task RefreshSubscriptionAsync(Guid id, LoginCredential credential, int generation, bool force, bool quiet) {
+    private async Task RefreshSubscriptionAsync(Guid id, LoginCredential credential, int generation, bool force, bool quiet, CancellationToken ct) {
         var checkedAt = DateTimeOffset.UtcNow;
         subscriptions.TryGetValue(id, out var previous);
         if (previous != null && !ShouldRefreshSubscription(previous.Status, previous.Snapshot, previous.At, checkedAt, force)) return;
@@ -182,13 +185,13 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         }
         SubscriptionEntry next;
         try {
-            var result = await subscriptionReader.ReadAsync(credential, usageLifetime.Token);
+            var result = await subscriptionReader.ReadAsync(credential, ct);
             var snapshot = result.ActiveUntil is { } until ? new SubscriptionSnapshot(until, checkedAt, result.Source, result.IsVerified) : null;
             var retained = previous?.Snapshot is { IsVerified: true } last && last.ActiveUntil > checkedAt ? last : null;
             next = snapshot != null ? new(snapshot, result.PlanType, result.IsVerified ? "verified" : "login_snapshot", null, checkedAt)
                 : new(retained, result.PlanType ?? previous?.PlanType, retained == null ? "unavailable" : "stale",
                     "官方订阅接口暂未返回有效期，请稍后刷新核验。", checkedAt);
-        } catch (OperationCanceledException) when (usageLifetime.IsCancellationRequested) { return; }
+        } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
         catch {
             var retained = previous?.Snapshot is { IsVerified: true } last && last.ActiveUntil > checkedAt ? last : null;
             next = new(retained, previous?.PlanType, retained == null ? "unavailable" : "stale",
@@ -252,7 +255,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         this.subscriptionReader = subscriptionReader ?? new OfficialSubscriptionReader(); ownsSubscriptionReader = subscriptionReader == null;
         this.activeHome = SecureFiles.ResolveStorageRoot(activeHome ?? Environment.GetEnvironmentVariable("CODEX_HOME")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"));
-        runtimeFactory = () => new HostedRuntime(new CoreClient(hostPath, this.dataPath, this.activeHome, this, null, storageRootsResolved: true));
+        runtimeFactory = () => new HostedRuntime(new CoreClient(hostPath, this.dataPath, this.activeHome, this, null, storageRootsResolved: true, nativeAccountApi: directUsageEnabled));
     }
 
     internal GuardedAccountClient(string dataPath, string activeHome, Func<IAccountRuntime> runtimeFactory,
@@ -329,6 +332,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         }
         try {
             if (core == null) throw new IOException("Account core is unavailable. Restart the app.");
+            if (command == "remove" && !core.State.Accounts.Any(row => row.Profile.Id == accountID)) return;
             if (command == "add") Notify();
             if (command == "dismissError") error = null;
             if (command == "resetQuota") { if (accountID is { } resetId) await ResetQuotaAsync(resetId); return; }
@@ -392,6 +396,11 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             // another command cannot steal a gate released to this waiter.
             Volatile.Write(ref foregroundWaiting, 1);
             wait = commands.WaitAsync(usageLifetime.Token);
+            if (command is "remove" or "add" or "import") {
+                // Invalidate first: even a reader that completes during cancellation cannot publish stale data.
+                AdvanceUsageGeneration();
+                automaticUsageCancellation?.Cancel();
+            }
         }
         Notify();
         try {

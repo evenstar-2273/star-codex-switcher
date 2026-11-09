@@ -234,11 +234,11 @@ internal static class QuotaRefreshChecks
             "Pending host/direct timer reads preserve loaded quotas without a loading placeholder or global busy state.");
         var calls = fixture.Runtime.Calls;
         var remove = client.CommandAsync("remove", fixture.IDs[0]);
-        await Task.Delay(30);
-        Check(!remove.IsCompleted && fixture.Runtime.Calls == calls && client.State.IsMutating,
-            "A user deletion waits behind the silent read and becomes visibly busy only after the explicit user command.");
+        await remove.WaitAsync(TimeSpan.FromSeconds(1));
+        Check(fixture.Runtime.Calls == calls + 1 && !client.State.IsMutating,
+            "Deletion cancels pending read-only network work without waiting for its response.");
         await client.CommandAsync("remove", fixture.IDs[0]);
-        Check(fixture.Runtime.Calls == calls, "A repeated deletion cannot queue a second mutation behind the first foreground waiter.");
+        Check(fixture.Runtime.Calls == calls + 1, "Repeated deletion of a removed account does not issue another mutation.");
         fixture.ReadGate.SetResult(); await remove; fixture.ReadGate = null; await Idle(client);
         Check(fixture.Runtime.Calls == calls + 1 && client.State.Accounts.All(row => row.Profile.Id != fixture.IDs[0]),
             "The queued delete is delivered exactly once after the background read completes.");

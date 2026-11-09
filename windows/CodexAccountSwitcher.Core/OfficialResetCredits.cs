@@ -6,7 +6,8 @@ using System.Text.Json;
 
 namespace CodexAccountSwitcher.Core;
 
-public sealed record ResetCreditSnapshot(int? AvailableCount, DateTimeOffset? EarliestExpiry);
+public sealed record BankedCredit(string Id, string Status, string ResetType, DateTimeOffset? ExpiresAt);
+public sealed record ResetCreditSnapshot(int? AvailableCount, DateTimeOffset? EarliestExpiry, BankedCredit[]? Credits = null);
 
 public interface IResetCreditService
 {
@@ -61,13 +62,18 @@ public sealed class OfficialResetCredits : IResetCreditService, IDisposable
     }
 
     public async Task ConsumeAsync(LoginCredential credential, CancellationToken ct)
+        => await ConsumeAsync(credential, null, Guid.NewGuid().ToString("D"), ct);
+
+    internal async Task ConsumeAsync(LoginCredential credential, string? creditId, string requestId, CancellationToken ct)
     {
         var available = await ReadAsync(credential, ct);
         if (available.AvailableCount is not > 0)
             throw new ResetCreditException(available.AvailableCount == 0 ? "没有可用的重置次数。" : "无法确认可用重置次数，未执行重置。请先刷新。", availableCount: available.AvailableCount);
+        if (creditId != null && available.Credits?.Any(c => c.Id == creditId && c.Status == "available" && c.ExpiresAt > now()) != true)
+            throw new ResetCreditException("待重置的卡已不可用，未执行重置，请刷新后核对。");
         ct.ThrowIfCancellationRequested();
         using var request = Request(HttpMethod.Post, Endpoint + "/consume", credential);
-        request.Content = new StringContent(JsonSerializer.Serialize(new { redeem_request_id = Guid.NewGuid().ToString("D") }), Encoding.UTF8, "application/json");
+        request.Content = new StringContent(JsonSerializer.Serialize(new { redeem_request_id = requestId }), Encoding.UTF8, "application/json");
         try {
             using var response = await http.SendAsync(request, ct);
             if (!response.IsSuccessStatusCode) throw HttpFailure(response.StatusCode, consuming: true);
@@ -98,6 +104,7 @@ public sealed class OfficialResetCredits : IResetCreditService, IDisposable
             JsonElement? records = root.ValueKind == JsonValueKind.Array ? root : Property(root, "credits");
             records ??= data is { ValueKind: JsonValueKind.Array } ? data : data is { } nested ? Property(nested, "credits") : null;
             DateTimeOffset? earliest = null;
+            var banked = new List<BankedCredit>();
             if (records is { ValueKind: JsonValueKind.Array } entries) {
                 var derived = 0; var complete = true;
                 foreach (var entry in entries.EnumerateArray()) {
@@ -110,12 +117,15 @@ public sealed class OfficialResetCredits : IResetCreditService, IDisposable
                     var recognizable = expiry != null || Property(entry, "id", "credit_id", "creditId") != null || status != null;
                     if (!recognizable || status is not (null or "available" or "active" or "unredeemed")) { complete = false; continue; }
                     derived++;
+                    var id = Property(entry, "id", "credit_id", "creditId");
+                    if (id is { ValueKind: JsonValueKind.String } identifier && !string.IsNullOrWhiteSpace(identifier.GetString()))
+                        banked.Add(new(identifier.GetString()!, "available", "codexRateLimits", expiry));
                     if (expiry != null && (earliest == null || expiry < earliest)) earliest = expiry;
                 }
                 if (count == null && complete) count = derived;
             }
             if (count == 0) earliest = null;
-            return new(count, earliest);
+            return new(count, earliest, records is { ValueKind: JsonValueKind.Array } ? banked.ToArray() : null);
         } catch (Exception ex) when (ex is JsonException or FormatException or InvalidOperationException or ArgumentOutOfRangeException) {
             throw new ResetCreditException("重置次数响应格式无法识别，未将未知次数显示为 0。");
         }

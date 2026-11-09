@@ -52,6 +52,12 @@ jobs:
         run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- storage-paths ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Storage directory compatibility checks failed.' }
+      - name: Check native accounts without Codex CLI
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- native-authorization ./windows/artifacts/installer-runtime/SwitcherHost.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Native authorization and local deletion checks failed.' }
       - name: Check current account removal
         timeout-minutes: 5
         shell: pwsh

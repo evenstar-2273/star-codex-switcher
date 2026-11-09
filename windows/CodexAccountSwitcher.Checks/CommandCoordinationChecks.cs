@@ -75,14 +75,14 @@ internal static class CommandCoordinationChecks
         Task? queued = null;
         try {
             await client.InitializeAsync(); await fixture.ReadStarted.Task.WaitAsync(Deadline);
-            queued = client.CommandAsync("add");
+            queued = client.CommandAsync("refresh");
             Check(!queued.IsCompleted && client.State.IsMutating, "Shutdown fixture has a real foreground waiter behind a pending read.");
         } finally {
             await client.DisposeAsync().AsTask().WaitAsync(Deadline);
             fixture.ReadGate.TrySetResult();
         }
         await queued!.WaitAsync(Deadline);
-        Check(fixture.Runtime.Count("add") == 0 && fixture.Runtime.Disposed,
+        Check(fixture.Runtime.Count("refresh") == 0 && fixture.Runtime.Disposed,
             "Shutdown cancels the pending read and reservation without starting a new login or deadlocking disposal.");
         fixture.CheckCredential();
     }

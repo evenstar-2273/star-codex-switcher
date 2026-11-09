@@ -17,6 +17,15 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
     private readonly Task stderr;
     private readonly IDesktopOperations desktop;
     private readonly Func<Uri, CancellationToken, Task> openBrowser;
+    private readonly string profilesPath;
+    private readonly ConcurrentDictionary<int, CancellationTokenSource> platformCancellation = new();
+    private readonly ConcurrentDictionary<int, Task> platformTasks = new();
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> profileWrites = new();
+    private readonly ConcurrentDictionary<int, Guid> nativeReadAccounts = new();
+    private readonly ConcurrentDictionary<Guid, byte> deletedAccounts = new();
+    internal Func<BrowserAuthorization> AuthorizationFactory { get; set; } = () => new();
+    internal Func<OfficialUsageReader> NativeUsageFactory { get; set; } = () => new();
+    internal Func<OfficialResetCredits> NativeCreditsFactory { get; set; } = () => new();
     private int nextID;
     public AccountSnapshot State { get; private set; } = AccountSnapshot.Empty;
     public event Action? Changed;
@@ -26,7 +35,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
         : this(hostPath, dataPath, activeHome, desktop, openBrowser, storageRootsResolved: false) { }
 
     internal CoreClient(string hostPath, string dataPath, string? activeHome, IDesktopOperations? desktop,
-        Func<Uri, CancellationToken, Task>? openBrowser, bool storageRootsResolved)
+        Func<Uri, CancellationToken, Task>? openBrowser, bool storageRootsResolved, bool nativeAccountApi = false)
     {
         activeHome ??= Environment.GetEnvironmentVariable("CODEX_HOME")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
@@ -35,6 +44,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
             activeHome = SecureFiles.ResolveStorageRoot(activeHome);
         }
         SecureFiles.RejectLinks(dataPath); SecureFiles.RejectLinks(activeHome);
+        profilesPath = Path.Combine(dataPath, "accounts");
         this.desktop = desktop ?? new DesktopController(ct => DesktopController.DiscoverAsync(null, ct));
         this.openBrowser = openBrowser ?? OpenBrowserAsync;
         context = SynchronizationContext.Current ?? new SynchronizationContext();
@@ -45,6 +55,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
             WorkingDirectory = Path.GetDirectoryName(hostPath)!
         };
         start.Environment["CODEX_SWITCHER_DATA_HOME"] = dataPath;
+        start.Environment["CODEX_SWITCHER_NATIVE_AUTH"] = nativeAccountApi ? "1" : "0";
         if (activeHome != null) start.Environment["CODEX_HOME"] = activeHome;
         start.Environment["PATH"] = Path.GetDirectoryName(hostPath) + ";" + Environment.GetEnvironmentVariable("PATH");
         process = Process.Start(start) ?? throw new IOException("The shared account core could not start.");
@@ -56,8 +67,26 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
     }
 
     public Task InitializeAsync() => SendAsync(new { command = "initialize" });
-    public Task CommandAsync(string command, Guid? accountID = null, bool? value = null, string? language = null)
-        => SendAsync(new { command, accountID, value, language });
+    public async Task CommandAsync(string command, Guid? accountID = null, bool? value = null, string? language = null)
+    {
+        SemaphoreSlim? gate = null;
+        if (command == "remove" && accountID is { } removed) {
+            gate = profileWrites.GetOrAdd(removed, _ => new(1));
+            await gate.WaitAsync(lifetime.Token);
+            deletedAccounts[removed] = 0;
+            foreach (var read in nativeReadAccounts.Where(pair => pair.Value == removed))
+                if (platformCancellation.TryGetValue(read.Key, out var cancellation)) {
+                    try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
+                }
+        }
+        try { await SendAsync(new { command, accountID, value, language }); }
+        finally {
+            if (gate != null) {
+                if (State.Accounts.Any(row => row.Profile.Id == accountID)) deletedAccounts.TryRemove(accountID!.Value, out _);
+                gate.Release();
+            }
+        }
+    }
 
     private async Task SendAsync(object command)
     {
@@ -105,7 +134,16 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
                         // Shell launch may block inside Windows. It must never block reading
                         // cancellation acknowledgements and updated account snapshots.
                         var operation = message.Clone();
-                        _ = Task.Run(() => HandlePlatformAsync(operation));
+                        platformCancellation[message.GetProperty("id").GetInt32()] = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+                        var operationId = message.GetProperty("id").GetInt32();
+                        var operationTask = Task.Run(() => HandlePlatformAsync(operation));
+                        platformTasks[operationId] = operationTask;
+                        _ = operationTask.ContinueWith(_ => platformTasks.TryRemove(operationId, out var completed), TaskScheduler.Default);
+                        break;
+                    case "platformCancel":
+                        if (platformCancellation.TryGetValue(message.GetProperty("id").GetInt32(), out var cancellation)) {
+                            try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
+                        }
                         break;
                     case "protocolError": throw new IOException("The shared core protocol failed.");
                 }
@@ -120,9 +158,64 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
 
     private async Task HandlePlatformAsync(JsonElement message)
     {
+        var id = message.GetProperty("id").GetInt32();
+        var cancellation = platformCancellation[id];
         string? error = null;
+        string? result = null;
         try {
             switch (message.GetProperty("method").GetString()) {
+                case "authorizeAccount":
+                    var path = ProfilePath(message);
+                    using (var authorization = AuthorizationFactory()) {
+                        var credential = await authorization.LoginAsync(openBrowser, cancellation.Token);
+                        cancellation.Token.ThrowIfCancellationRequested();
+                        SecureFiles.AtomicWrite(Path.Combine(path, "auth.json"), credential.Bytes);
+                    }
+                    break;
+                case "readAccountUsage":
+                    var credentialPath = Path.Combine(ProfilePath(message), "auth.json");
+                    var profileId = Guid.Parse(Path.GetFileName(Path.GetDirectoryName(credentialPath)!));
+                    nativeReadAccounts[id] = profileId;
+                    if (deletedAccounts.ContainsKey(profileId)) throw new IOException("该账号已删除。");
+                    var login = LoginCredential.Read(credentialPath);
+                    using (var usageReader = NativeUsageFactory())
+                    using (var creditReader = NativeCreditsFactory()) {
+                        Usage usage;
+                        try { usage = await usageReader.ReadAsync(login, cancellation.Token); }
+                        catch (QuotaReadException ex) when (QuotaReadException.IsAuthenticationFailure(ex.Message)) {
+                            using var authorization = AuthorizationFactory();
+                            // Token rotation must finish even if a read is cancelled; persist only to a still-live, unchanged profile.
+                            var refreshed = await authorization.RefreshAsync(login, lifetime.Token);
+                            var writeGate = profileWrites.GetOrAdd(profileId, _ => new(1));
+                            await writeGate.WaitAsync(lifetime.Token);
+                            try {
+                                if (deletedAccounts.ContainsKey(profileId) || !File.Exists(credentialPath) || !LoginCredential.Read(credentialPath).Bytes.SequenceEqual(login.Bytes))
+                                    throw new IOException("账号凭据已变化，已停止写回，请刷新重试。");
+                                SecureFiles.AtomicWrite(credentialPath, refreshed.Bytes);
+                            } finally { writeGate.Release(); }
+                            login = refreshed;
+                            usage = await usageReader.ReadAsync(login, cancellation.Token);
+                        }
+                        ResetCreditSnapshot? credits = null;
+                        try { credits = await creditReader.ReadAsync(login, cancellation.Token); }
+                        catch (ResetCreditException) { }
+                        var longest = usage.DisplayWindows().OrderByDescending(w => w.Seconds).FirstOrDefault();
+                        var remaining = usage.RemainingPercent ?? longest?.RemainingPercent;
+                        var resets = usage.ResetsAt ?? longest?.ResetsAt;
+                        if (remaining == null || resets == null) throw new IOException("服务暂未返回可识别的额度窗口，请稍后刷新。");
+                        result = JsonSerializer.Serialize(new {
+                            remainingPercent = remaining, resetsAt = WireDate(resets),
+                            fiveHourRemainingPercent = usage.FiveHourRemainingPercent, fiveHourResetsAt = WireDate(usage.FiveHourResetsAt),
+                            resetCreditsRemaining = credits?.AvailableCount,
+                            resetCredits = credits?.Credits?.Select(c => new { id = c.Id, status = c.Status, resetType = c.ResetType, expiresAt = WireDate(c.ExpiresAt) })
+                        });
+                    }
+                    break;
+                case "consumeAccountCredit":
+                    var target = LoginCredential.Read(Path.Combine(ProfilePath(message), "auth.json"));
+                    using (var credits = NativeCreditsFactory())
+                        await credits.ConsumeAsync(target, message.GetProperty("creditID").GetString(), message.GetProperty("requestID").GetString()!, cancellation.Token);
+                    break;
                 case "openBrowser":
                     var url = new Uri(message.GetProperty("url").GetString()!);
                     if (url.Scheme is not ("https" or "http")) throw new IOException("Invalid sign-in address.");
@@ -136,9 +229,24 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
                     break;
                 default: throw new IOException("Unknown platform operation.");
             }
-        } catch (Exception ex) { error = ex.Message; }
-        try { await WriteAsync(new { command = "platformReply", id = message.GetProperty("id").GetInt32(), error }); }
+        } catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { error = "已取消授权。"; }
+        catch (Exception ex) { error = ex.Message; }
+        finally { platformCancellation.TryRemove(id, out _); nativeReadAccounts.TryRemove(id, out _); }
+        try { await WriteAsync(new { command = "platformReply", id = message.GetProperty("id").GetInt32(), error, result }); }
         catch (Exception) when (lifetime.IsCancellationRequested || process.HasExited) { }
+        finally { cancellation.Dispose(); }
+    }
+
+    private static string? WireDate(DateTimeOffset? value) => value?.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+    private string ProfilePath(JsonElement message)
+    {
+        var profile = new Uri(message.GetProperty("url").GetString()!);
+        if (!profile.IsFile) throw new IOException("账号目录无效。");
+        var path = Path.GetFullPath(profile.LocalPath).TrimEnd(Path.DirectorySeparatorChar);
+        if (!string.Equals(Path.GetDirectoryName(path), profilesPath, StringComparison.OrdinalIgnoreCase) || !Guid.TryParse(Path.GetFileName(path), out _))
+            throw new IOException("账号目录无效。");
+        SecureFiles.RejectLinks(path);
+        return path;
     }
 
     private static Task OpenBrowserAsync(Uri url, CancellationToken ct)
@@ -150,6 +258,9 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        foreach (var cancellation in platformCancellation.Values) {
+            try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
+        }
         try { process.StandardInput.Close(); }
         catch (IOException) when (process.HasExited) { }
         try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
@@ -159,6 +270,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
         }
         lifetime.Cancel();
         try { await Task.WhenAll(reader, stderr); } catch (OperationCanceledException) { }
+        await Task.WhenAll(platformTasks.Values);
         process.Dispose(); lifetime.Dispose(); writeLock.Dispose();
     }
 }

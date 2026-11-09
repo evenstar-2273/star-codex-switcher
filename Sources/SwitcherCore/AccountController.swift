@@ -22,6 +22,7 @@ open class AccountController {
     private let store: AccountStore
     private let codex: any AccountClient
     private let switchService: any SwitchServicing
+    private let localDeletionWithoutWaiting: Bool
     private var hasStarted = false
     private var usageRefreshTask: Task<Void, Never>?
     private var nextUsageRefreshTask: Task<Void, Never>?
@@ -38,12 +39,14 @@ open class AccountController {
         store: AccountStore,
         codex: any AccountClient,
         switchService: any SwitchServicing,
-        usageRefreshSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        usageRefreshSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        localDeletionWithoutWaiting: Bool = false
     ) {
         self.store = store
         self.codex = codex
         self.switchService = switchService
         self.usageRefreshSleep = usageRefreshSleep
+        self.localDeletionWithoutWaiting = localDeletionWithoutWaiting
     }
 
     public func text(_ key: String) -> String {
@@ -331,10 +334,9 @@ open class AccountController {
     public func removeAccount(id: UUID) async {
         guard !isMutating else { return }
         isMutating = true
-        await cancelUsageRefresh()
+        if !localDeletionWithoutWaiting { await cancelUsageRefresh() }
         defer { isMutating = false; refreshWeeklyUsage() }
         do {
-            try await syncActiveIdentity()
             try await store.removeAccount(id: id)
             apply(try await store.loadRegistry())
             usageStates[id] = nil
