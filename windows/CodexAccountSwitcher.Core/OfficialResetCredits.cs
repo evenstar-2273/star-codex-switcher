@@ -120,6 +120,7 @@ public sealed class OfficialResetCredits : IResetCreditService, IDisposable
                     var id = Property(entry, "id", "credit_id", "creditId");
                     var type = Property(entry, "type", "reset_type", "resetType");
                     var resetType = type is { ValueKind: JsonValueKind.String } knownType ? knownType.GetString()! : "codexRateLimits";
+                    if (resetType is "rate_limit_reset" or "codex_rate_limits") resetType = "codexRateLimits";
                     if (id is { ValueKind: JsonValueKind.String } identifier && !string.IsNullOrWhiteSpace(identifier.GetString()))
                         banked.Add(new(identifier.GetString()!, "available", resetType, expiry));
                     if (expiry != null && (earliest == null || expiry < earliest)) earliest = expiry;

@@ -79,6 +79,8 @@ internal static class ResetCreditsChecks
         Require(parsed.Credits?.Length == 2 && parsed.Credits.All(c => c.ResetType == "codexRateLimits"), "Available card identities and expiry are retained for native automatic reset scheduling.");
         var otherType = OfficialResetCredits.Parse("""{"credits":[{"id":"other","type":"futureProduct","status":"available","expires_at":"2026-12-01T00:00:00Z"}]}""", Now);
         Require(otherType.Credits?.Single().ResetType == "futureProduct", "Other reset types cannot be promoted to Codex automatic resets.");
+        Require(OfficialResetCredits.Parse("""{"credits":[{"id":"http-card","type":"rate_limit_reset","status":"available","expires_at":"2026-12-01T00:00:00Z"}]}""", Now).Credits?.Single().ResetType == "codexRateLimits",
+            "The HTTP reset-card type maps to the native scheduler's Codex type.");
         Require(OfficialResetCredits.Parse("""{"available_count":0,"credits":[{"id":"stale","expires_at":"2026-12-01T00:00:00Z"}]}""", Now).Credits?.Length == 0, "A zero server count prevents stale records from authorizing automatic reset.");
         Require(OfficialResetCredits.Parse("{}", Now).AvailableCount == null, "Missing detail is unknown, never zero.");
         Require(OfficialResetCredits.Parse("{\"credits\":[]}", Now).AvailableCount == 0, "An explicitly empty list is known zero.");
