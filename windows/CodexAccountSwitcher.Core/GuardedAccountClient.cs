@@ -2,7 +2,7 @@ namespace CodexAccountSwitcher.Core;
 
 // Retain the signed-in-account UI/core protocol, wrap desktop handoff
 // with online validation and recovery, and stop the host around file import.
-public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAsyncDisposable, IDesktopOperations
+public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAccountExporter, IAsyncDisposable, IDesktopOperations
 {
     private readonly string dataPath, activeHome;
     private readonly Func<IAccountRuntime> runtimeFactory;
@@ -242,6 +242,12 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         }
     }
     private string CredentialPath(Guid id) => Path.Combine(dataPath, "accounts", id.ToString().ToUpperInvariant(), "auth.json");
+    public string ExportAccount(Guid id, AccountExportFormat format)
+    {
+        var row = State.Accounts.FirstOrDefault(account => account.Profile.Id == id)
+            ?? throw new IOException("此账号已删除，请刷新列表后重试。");
+        return AccountExport.Build(LoginCredential.Read(CredentialPath(id)), row, format);
+    }
     private static async Task<Usage> ReadOfficialUsageAsync(LoginCredential credential, CancellationToken ct) {
         using var reader = new OfficialUsageReader(); return await reader.ReadAsync(credential, ct);
     }
@@ -249,7 +255,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
     public GuardedAccountClient(string hostPath, string dataPath, string? activeHome = null,
         IDesktopOperations? desktop = null, ILoginValidator? validator = null,
         IResetCreditService? resetCredits = null, Func<LoginCredential, CancellationToken, Task<Usage>>? usageReader = null,
-        ISubscriptionReader? subscriptionReader = null)
+        ISubscriptionReader? subscriptionReader = null, Func<string>? authorizationAccentPreference = null)
     {
         this.dataPath = SecureFiles.ResolveStorageRoot(dataPath);
         this.desktop = desktop ?? new DesktopController(ct => DesktopController.DiscoverAsync(null, ct));
@@ -260,7 +266,9 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
         this.subscriptionReader = subscriptionReader ?? new OfficialSubscriptionReader(); ownsSubscriptionReader = subscriptionReader == null;
         this.activeHome = SecureFiles.ResolveStorageRoot(activeHome ?? Environment.GetEnvironmentVariable("CODEX_HOME")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"));
-        runtimeFactory = () => new HostedRuntime(new CoreClient(hostPath, this.dataPath, this.activeHome, this, null, storageRootsResolved: true, nativeAccountApi: directUsageEnabled));
+        runtimeFactory = () => new HostedRuntime(new CoreClient(hostPath, this.dataPath, this.activeHome, this, null, storageRootsResolved: true, nativeAccountApi: directUsageEnabled) {
+            AuthorizationAccentPreference = authorizationAccentPreference
+        });
     }
 
     internal GuardedAccountClient(string dataPath, string activeHome, Func<IAccountRuntime> runtimeFactory,
@@ -365,7 +373,9 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
                 error = "该账号登录已失效，请先重新授权后再切换。";
                 return;
             }
-            busy = true; error = null; AdvanceUsageGeneration(clear: true); Notify();
+            // Invalidate pending results, not the account information already on
+            // screen. Keep it until fresh results arrive after the handoff.
+            busy = true; error = null; AdvanceUsageGeneration(); usageRevisions.Clear(); Notify();
             await core.CommandAsync("dismissError");
             transaction = new GuardedSwitch(Path.Combine(dataPath, "accounts", accountID.Value.ToString().ToUpperInvariant()), activeHome, validator, desktop);
             Exception? transportError = null;

@@ -116,8 +116,9 @@ public partial class App : Application
             installerListener = ThreadPool.RegisterWaitForSingleObject(installerQuit, (_, _) => Dispatcher.BeginInvoke(new Action(async () => {
                 if (!exiting && window != null && !window.IsBusy && client?.State.IsAddingAccount != true) await QuitAsync();
             })), null, Timeout.Infinite, false);
-            client = new GuardedAccountClient(HostRuntime.Resolve(Assembly.GetExecutingAssembly()), dataPath);
             var native = new NativeSettings();
+            client = new GuardedAccountClient(HostRuntime.Resolve(Assembly.GetExecutingAssembly()), dataPath,
+                authorizationAccentPreference: () => native.AccentPreference);
             UseThemeSettings(native);
             native.ExitForUpdate = () => QuitAsync(forUpdate: true);
             window = new MainWindow(client, native); MainWindow = window;

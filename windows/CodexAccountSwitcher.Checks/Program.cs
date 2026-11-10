@@ -7,6 +7,7 @@ if (args.FirstOrDefault() == "app-server") {
 }
 
 if (args.FirstOrDefault() == "guarded") return await GuardedChecks.RunAsync(args.ElementAtOrDefault(1));
+if (args.FirstOrDefault() == "account-export") return AccountExportChecks.Run();
 if (args.FirstOrDefault() == "plans") return await PlanChecks.RunAsync();
 if (args.FirstOrDefault() == "reset-credits") return await ResetCreditsChecks.RunAsync();
 if (args.FirstOrDefault() == "subscriptions") return await SubscriptionChecks.RunAsync();

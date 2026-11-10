@@ -76,6 +76,11 @@ jobs:
         run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- plans
           if ($LASTEXITCODE -ne 0) { throw 'Plan metadata checks failed.' }
+      - name: Check account export formats
+        shell: pwsh
+        run: |
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- account-export
+          if ($LASTEXITCODE -ne 0) { throw 'Account export checks failed.' }
       - name: Check reset credits
         timeout-minutes: 5
         shell: pwsh

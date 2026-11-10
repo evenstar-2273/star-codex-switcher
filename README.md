@@ -1,6 +1,6 @@
 # Star Codex Switcher
 
-面向 Windows 的 Codex 账号管理与切换工具。支持账号额度查看、JSON 导入和安装版更新，只维护 Codex 场景。
+面向 Windows 的 Codex 账号管理与切换工具。支持账号额度查看、JSON 导入导出和安装版更新，只维护 Codex 场景。
 
 [GitHub 下载最新版](https://github.com/evenstar-2273/star-codex-switcher/releases/latest/download/Star-Codex-Switcher-Setup-x64.exe) · [问题反馈](https://github.com/evenstar-2273/star-codex-switcher/issues) · [更新记录](CHANGELOG.md) · [构建与发布](docs/windows-build-release.md)
 
@@ -23,6 +23,7 @@
 - 手动重置前确认账号、次数和重置卡到期时间；请求结果不明确时停止重试，先刷新核对。
 - 重置卡最早到期时间后用括号显示剩余倒计时，账号列表与重置确认页一致，并随时间更新。时间与图标按到期临近程度提醒：超过 3 天为绿色，超过 24 小时至 3 天为橙色，24 小时内为红色；3 天内加粗，未知时间保持灰色，已到期提示刷新。
 - 添加账号时可选择浏览器授权、JSON 导入或获取本地已登录的账号；支持粘贴文本或选择官方 `auth.json` 与兼容的账号 JSON 文件，导入成功自动关闭弹窗。
+- 每张卡片的删除按钮左侧提供导出入口，默认 Star Codex Switcher 格式，也可选官方 `auth.json`、sub2api 和 CPA；支持隐藏凭据预览、复制完整 JSON 和下载文件。
 - Windows 当前用户安装，内置运行所需组件；首页检测新版后弹窗提醒，可跳过版本、暂不更新或更新并重启。
 
 ## 安装与使用

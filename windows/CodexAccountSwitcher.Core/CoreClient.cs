@@ -25,6 +25,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
     private readonly ConcurrentDictionary<int, Guid> nativeReadAccounts = new();
     private readonly ConcurrentDictionary<Guid, byte> deletedAccounts = new();
     internal Func<BrowserAuthorization> AuthorizationFactory { get; set; } = () => new();
+    internal Func<string>? AuthorizationAccentPreference { get; init; }
     internal Func<OfficialUsageReader> NativeUsageFactory { get; set; } = () => new();
     internal Func<OfficialResetCredits> NativeCreditsFactory { get; set; } = () => new();
     private int nextID;
@@ -169,7 +170,7 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
                 case "authorizeAccount":
                     var path = ProfilePath(message);
                     using (var authorization = AuthorizationFactory()) {
-                        var credential = await authorization.LoginAsync(openBrowser, cancellation.Token);
+                        var credential = await authorization.LoginAsync(openBrowser, cancellation.Token, AuthorizationAccentPreference);
                         cancellation.Token.ThrowIfCancellationRequested();
                         SecureFiles.AtomicWrite(Path.Combine(path, "auth.json"), credential.Bytes);
                     }

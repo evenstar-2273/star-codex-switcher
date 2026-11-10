@@ -477,6 +477,11 @@ public sealed class MainWindow : Window
         AutomationProperties.SetName(reset, L("重置额度", "Reset quota")); accountActions.Children.Add(reset);
         var refresh = RefreshButton("", row.Profile.Id);
         refresh.ToolTip = L("刷新此账号", "Refresh this account"); AutomationProperties.SetName(refresh, L("刷新此账号", "Refresh this account")); utilityActions.Children.Add(refresh);
+        if (client is IAccountExporter exporter) {
+            var export = Button("", () => new JsonExportWindow(exporter, row) { Owner = this }.ShowDialog(), "\uE898");
+            export.Margin = new Thickness(8, 0, 0, 0); export.IsEnabled &= !State.IsAddingAccount;
+            export.ToolTip = "导出此账号"; AutomationProperties.SetName(export, "导出此账号"); utilityActions.Children.Add(export);
+        }
         var remove = Button("", () => StartConfirmation(row, "remove"), "\uE74D"); remove.Margin = new Thickness(8, 0, 0, 0);
         remove.IsEnabled &= !State.IsAddingAccount; remove.ToolTip = L("删除此账号", "Delete this account");
         AutomationProperties.SetName(remove, T("remove")); utilityActions.Children.Add(remove);

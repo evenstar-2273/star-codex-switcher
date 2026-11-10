@@ -23,9 +23,17 @@ internal static class NativeAuthorizationChecks
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false });
         using var result = await http.GetAsync(query["redirect_uri"] + "?code=synthetic-code&state=" + Uri.EscapeDataString(stateOverride ?? query["state"]));
         Check(result.StatusCode == (stateOverride == null ? HttpStatusCode.OK : HttpStatusCode.BadRequest), "Only the matching OAuth state is accepted.");
+        var page = await result.Content.ReadAsStringAsync();
+        Check(result.Content.Headers.ContentType?.MediaType == "text/html" && page.Contains("<html lang=\"zh-CN\">"), "Callback serves a Chinese HTML page.");
+        Check(page.Contains(stateOverride == null ? "授权信息已收到" : "授权未完成") && !page.Contains("synthetic-code") && !page.Contains(query["state"]), "Callback status is accurate without exposing OAuth data.");
+        Check(result.Headers.CacheControl?.NoStore == true && result.Headers.Contains("Content-Security-Policy"), "Callback HTML disallows caching and external resources.");
     }
     private static async Task BrowserAsync()
     {
+        foreach (var (accent, color) in new[] { ("purple", "#7040CE"), ("blue", "#1457C5"), ("teal", "#08765F"), ("orange", "#A94B12") })
+            Check(BrowserAuthorization.CallbackPage(true, false, accent).Contains(color), "Callback uses the chosen theme palette.");
+        Check(BrowserAuthorization.CallbackPage(true, true).Contains("授权未完成"), "Declined authorization never displays success.");
+        Check(BrowserAuthorization.CallbackPage(true, false, "<script>") == BrowserAuthorization.CallbackPage(true, false), "Unknown theme falls back to purple without injecting settings into HTML.");
         var handler = new TokenHandler();
         using var auth = new BrowserAuthorization(handler, 0);
         Task callback = Task.CompletedTask;

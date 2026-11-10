@@ -14,6 +14,7 @@ internal static class QuotaRefreshChecks
             await InitialResetCycleAsync();
             await SilentDeleteAsync();
             await AuthenticationGuardAsync();
+            await SwitchPresentationChecks.RunAsync();
             await SettingFailureAsync();
             if (host != null) {
                 await GuardedHostSettingAsync(Path.GetFullPath(host));

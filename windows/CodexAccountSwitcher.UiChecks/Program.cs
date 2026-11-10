@@ -17,6 +17,12 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length >= 1 && args[0] == "--test-export") {
+            try {
+                var app = new App(false); app.InitializeComponent(); app.ApplyPalette(false);
+                ExportChecks.Run(app, Path.GetFullPath(args.ElementAtOrDefault(1) ?? "windows/artifacts/export"), new NativeSettings()); return 0;
+            } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
         if (args.Length >= 1 && args[0] == "--test-account-actions") {
             try {
                 var app = new App(false); app.InitializeComponent(); app.ApplyPalette(false);
@@ -251,6 +257,7 @@ internal static class Program
             Assert(!window.IsVisible && !closed, "An active operation can continue while the window is hidden.");
             client.State = client.State with { IsMutating = false };
             RefreshResetChecks.Run(app, Path.Combine(output, "refresh-reset"), native);
+            ExportChecks.Run(app, Path.Combine(output, "export"), native);
             QuotaRefreshChecks.Run(app, Path.Combine(output, "quota-refresh"), native);
             UpdatePromptChecks.Run(app, Path.Combine(output, "update-prompts"), native);
             window.CloseForExit();
@@ -347,13 +354,13 @@ internal static class Program
                 }
                 var buttons = All<Button>(cards[i]).Where(button => button.IsVisible).ToArray();
                 foreach (var button in buttons) {
-                    var point = button.TranslatePoint(new Point(), cards[i]);
-                    Assert(point.X >= -1 && point.X + button.ActualWidth <= cards[i].ActualWidth + 1,
+                    var bounds = button.TransformToAncestor(cards[i]).TransformBounds(new Rect(button.RenderSize));
+                    Assert(bounds.Left >= -1 && bounds.Right <= cards[i].ActualWidth + 1,
                         "Account action buttons stay inside each card at column breakpoints.");
                 }
                 for (var a = 0; a < buttons.Length; a++) for (var b = a + 1; b < buttons.Length; b++) {
-                    var first = new Rect(buttons[a].TranslatePoint(new Point(), cards[i]), buttons[a].RenderSize);
-                    var second = new Rect(buttons[b].TranslatePoint(new Point(), cards[i]), buttons[b].RenderSize);
+                    var first = buttons[a].TransformToAncestor(cards[i]).TransformBounds(new Rect(buttons[a].RenderSize));
+                    var second = buttons[b].TransformToAncestor(cards[i]).TransformBounds(new Rect(buttons[b].RenderSize));
                     first.Intersect(second);
                     Assert(first.IsEmpty || first.Width <= 1 || first.Height <= 1, "Actions do not overlap in narrow multi-column cards.");
                 }
@@ -396,13 +403,14 @@ internal static class Program
                 var leading = (FrameworkElement)reset.Parent; var trailing = (FrameworkElement)refresh.Parent;
                 var actions = (FrameworkElement)leading.Parent;
                 var requiredWidth = leading.DesiredSize.Width + 10 + trailing.DesiredSize.Width;
-                var shouldWrap = requiredWidth > actions.ActualWidth;
+                var scale = Math.Clamp((actions.ActualWidth - 10) / (requiredWidth - 10), .88, 1);
+                var shouldWrap = (requiredWidth - 10) * scale + 10 > actions.ActualWidth + .1;
                 var resetY = reset.TranslatePoint(new Point(), unknownCard).Y;
                 var refreshY = refresh.TranslatePoint(new Point(), unknownCard).Y;
                 Console.WriteLine($"English actions: card={unknownCard.ActualWidth:0.##}, available={actions.ActualWidth:0.##}, required={requiredWidth:0.##}, wrap={shouldWrap}, clamped={clamped}.");
-                Assert(shouldWrap ? refreshY >= resetY + reset.ActualHeight : Math.Abs(refreshY - resetY) <= 1,
+                Assert(shouldWrap ? refreshY >= resetY + reset.ActualHeight * scale : Math.Abs(refreshY - resetY) <= 1,
                     "Unknown English reset text remains complete; utilities wrap only when the actual action width needs another row.");
-                checkedMinimumWrap |= unknownCard.ActualWidth <= 381 && shouldWrap;
+                checkedMinimumWrap |= unknownCard.ActualWidth <= 381 && (shouldWrap || scale < 1);
                 checkedClampedSingleRow |= clamped && window.ActualWidth <= 1045 && unknownCard.ActualWidth > 400 && !shouldWrap;
             }
         } finally { window.MaxWidth = englishMaxWidth; }
