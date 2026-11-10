@@ -13,7 +13,7 @@ public interface ISubscriptionReader
     Task<SubscriptionLookup> ReadAsync(LoginCredential credential, CancellationToken ct);
 }
 
-// Keeps a current login's subscription period until it expires, then queries account responses.
+// Query current billing even before the login snapshot expires, so renewals become visible.
 // It never refreshes tokens, changes the selected workspace, or infers a billing period.
 public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposable
 {
@@ -30,8 +30,6 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
     public async Task<SubscriptionLookup> ReadAsync(LoginCredential credential, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (credential.SubscriptionActiveUntil is { } loginUntil && loginUntil > now())
-            return new(credential.AccountID, credential.PlanType, loginUntil, "login_snapshot", IsVerified: false);
         var offset = -(int)TimeZoneInfo.Local.GetUtcOffset(now()).TotalMinutes;
         var accounts = await GetAsync(CheckPath, "timezone_offset_min=" + offset.ToString(CultureInfo.InvariantCulture), credential, ct);
         var selected = ParseAccountCheck(accounts, credential.AccountID, credential.OrganizationID);
@@ -95,6 +93,9 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
                 ?? records.FirstOrDefault(row => row.Plan != null && !row.Plan.Equals("free", StringComparison.OrdinalIgnoreCase))
                 ?? records.FirstOrDefault()
                 ?? throw new SubscriptionReadException("订阅接口未返回可识别的账号，有效期仍待核验。");
+            if (accountId != null && selected.AccountID != accountId &&
+                !(organizationId != null && selected.Key == organizationId))
+                return new(accountId, null, null, "accounts_check");
             return new(selected.AccountID, selected.Plan, selected.Expiry, "accounts_check");
         } catch (SubscriptionReadException) { throw; }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException) {

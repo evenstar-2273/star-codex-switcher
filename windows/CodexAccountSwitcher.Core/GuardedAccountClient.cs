@@ -184,16 +184,21 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAs
             if (!quiet || previous == null) subscriptions[id] = new(previous?.Snapshot, previous?.PlanType, "checking", null, previous?.At ?? checkedAt);
         }
         SubscriptionEntry next;
+        // A failed check may keep a valid snapshot, but never certify it as fresh.
+        // Prefer the last server date over the older date embedded in login credentials.
+        SubscriptionSnapshot? Retained() => previous?.Snapshot is { } last && last.ActiveUntil > checkedAt ? last
+            : credential.SubscriptionActiveUntil is { } until && until > checkedAt
+                ? new SubscriptionSnapshot(until, checkedAt, "login_snapshot", false) : null;
         try {
             var result = await subscriptionReader.ReadAsync(credential, ct);
             var snapshot = result.ActiveUntil is { } until ? new SubscriptionSnapshot(until, checkedAt, result.Source, result.IsVerified) : null;
-            var retained = previous?.Snapshot is { IsVerified: true } last && last.ActiveUntil > checkedAt ? last : null;
+            var retained = Retained();
             next = snapshot != null ? new(snapshot, result.PlanType, result.IsVerified ? "verified" : "login_snapshot", null, checkedAt)
                 : new(retained, result.PlanType ?? previous?.PlanType, retained == null ? "unavailable" : "stale",
                     "官方订阅接口暂未返回有效期，请稍后刷新核验。", checkedAt);
         } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
         catch {
-            var retained = previous?.Snapshot is { IsVerified: true } last && last.ActiveUntil > checkedAt ? last : null;
+            var retained = Retained();
             next = new(retained, previous?.PlanType, retained == null ? "unavailable" : "stale",
                 "订阅有效期尚未核验，请检查网络或重新授权后刷新。", checkedAt);
         }

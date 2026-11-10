@@ -9,6 +9,7 @@ internal static class PlanChecks
     {
         try {
             var now = DateTimeOffset.Parse("2026-11-06T12:00:00Z");
+            EffectiveQuotaChecks(now);
             foreach (var plan in new[] { "free", "plus", "prolite", "pro", "promax" }) {
                 var credential = Credential(plan);
                 Require(credential.PlanType == plan, "The ID token's plan must survive credential parsing.");
@@ -47,6 +48,27 @@ internal static class PlanChecks
             Console.WriteLine("PASS: plan metadata, authoritative response, missing/invalid claim and legacy snapshot checks (synthetic only).");
             return 0;
         } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+    }
+
+    private static void EffectiveQuotaChecks(DateTimeOffset now)
+    {
+        var raw = OfficialUsageReader.Parse("""
+            {"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":0,"reset_after_seconds":18000},
+            "secondary_window":{"limit_window_seconds":604800,"used_percent":100,"reset_after_seconds":172800}}}
+            """, now);
+        var display = raw.DisplayWindows().ToArray();
+        Require(display.Length == 2 && display.All(w => w.RemainingPercent == 0), "Weekly exhaustion blocks displayed five-hour availability.");
+        Require(raw.FiveHourRemainingPercent == 100 && raw.Windows![0].RemainingPercent == 100, "Display policy never mutates raw quota or cached values.");
+        Require(display[0].ResetsAt == now.AddHours(5) && display[1].ResetsAt == now.AddDays(2), "Each window retains its original reset time.");
+        var legacy = new Usage(0, now.AddDays(2), 100, now.AddHours(5));
+        Require(legacy.DisplayWindows().First().RemainingPercent == 0, "Old cached snapshots use the same display policy.");
+        Require((legacy with { RemainingPercent = 1 }).DisplayWindows().First().RemainingPercent == 100, "Renewed weekly availability restores the raw short-window percentage.");
+        Require(new Usage(42, now, 0, now).DisplayWindows().Last().RemainingPercent == 42, "Short-window exhaustion does not zero the weekly window.");
+        Require(new Usage(null, null, 100, now).DisplayWindows().Single().RemainingPercent == 100, "A missing weekly window is not treated as exhausted.");
+        Require(new Usage(0, now, null, null).DisplayWindows().Single().Seconds == 604800, "Weekly-only accounts do not gain an invented short window.");
+        Require((legacy with { Windows = [new(2592000, 100, now)] }).DisplayWindows().Single().RemainingPercent == 100,
+            "Explicit monthly windows ignore stale legacy weekly fields.");
+        Require((legacy with { Windows = [] }).DisplayWindows().Count() == 0, "An explicit empty window list stays empty.");
     }
 
     private static LoginCredential Credential(object? plan, string email = "plan@example.test", string id = "synthetic-plan-account", string? accessPlan = null)

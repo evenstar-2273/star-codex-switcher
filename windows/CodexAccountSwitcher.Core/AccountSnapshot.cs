@@ -11,11 +11,15 @@ public sealed record Usage(int? RemainingPercent, DateTimeOffset? ResetsAt,
 {
     public IEnumerable<QuotaWindow> DisplayWindows()
     {
-        if (Windows != null) return Windows;
         var legacy = new List<QuotaWindow>(2);
         if (FiveHourRemainingPercent is int shortQuota) legacy.Add(new(18000, shortQuota, FiveHourResetsAt));
         if (RemainingPercent is int weekly) legacy.Add(new(604800, weekly, ResetsAt));
-        return legacy;
+        var windows = Windows ?? legacy.ToArray();
+        // Weekly exhaustion blocks short-window availability, without changing
+        // the raw quota, window presence or either window's reset timestamp.
+        var weeklyBlocksShort = windows.Any(window => window.Seconds == 604800 && window.RemainingPercent == 0);
+        return windows.Select(window => weeklyBlocksShort && window.Seconds == 18000
+            ? window with { RemainingPercent = 0 } : window);
     }
 }
 public sealed record SubscriptionSnapshot(DateTimeOffset ActiveUntil, DateTimeOffset LastChecked, string Source = "login_snapshot", bool IsVerified = false);
