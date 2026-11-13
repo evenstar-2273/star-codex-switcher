@@ -35,7 +35,15 @@ $setup=Join-Path $OutputDirectory ("Star-Codex-Switcher-$releaseVersion-Setup-x6
 if($LASTEXITCODE -ne 0){throw 'NSIS build failed'}
 $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($setup+'.sha256',"$hash  $([IO.Path]::GetFileName($setup))`n",[Text.UTF8Encoding]::new($false))
-$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes="${releaseVersion}：新增四种账号 JSON 导出格式，默认 Star Codex Switcher，支持预览、复制和下载；切换账号时保留原套餐、额度、有效期及重置卡信息；浏览器授权页采用居中渐变卡片并跟随主题色，放大应用名称；卡片操作按钮在窄布局下适度缩小。"}
+$changelog = [IO.File]::ReadAllText((Join-Path $projectRoot 'CHANGELOG.md'))
+$section = [regex]::Match($changelog, '(?ms)^## ' + [regex]::Escape($releaseVersion) + '[^\r\n]*\r?\n(.*?)(?=^## |\z)')
+if (!$section.Success) { throw 'Matching release notes are missing from CHANGELOG.md' }
+$noteLines = @($section.Groups[1].Value -split '\r?\n' | Where-Object { $_.Trim() })
+for ($i = 0; $i -lt $noteLines.Count; $i++) {
+    if ($noteLines[$i] -notmatch ('^' + ($i + 1) + '\. ')) { throw 'Release notes must use sequential numbered lines' }
+}
+if ($noteLines.Count -eq 0) { throw 'Release notes are empty' }
+$feed=[ordered]@{version=$fileVersion;platform='windows-x64';package_type='installer';download_url=$BaseUrl+'/'+[IO.Path]::GetFileName($setup);sha256=$hash;app_sha256=(Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant();notes=($noteLines -join "`n")}
 [IO.File]::WriteAllText((Join-Path $OutputDirectory 'update-installed.json'),($feed|ConvertTo-Json)+"`n",[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $projectRoot 'windows\artifacts\latest-installed-build.txt'),$publish)
 Write-Output $setup

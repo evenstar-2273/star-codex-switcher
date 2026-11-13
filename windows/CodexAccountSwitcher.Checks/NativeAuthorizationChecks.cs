@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -99,11 +99,41 @@ internal static class NativeAuthorizationChecks
             quota.RejectOnce = true;
             await client.CommandAsync("refresh");
             var savedPath = Path.Combine(data, "accounts", id.ToString().ToUpperInvariant(), "auth.json");
-            var renewed = File.ReadAllBytes(savedPath);
-            await client.CommandAsync("refresh");
-            Check(tokenHandler.RefreshCalls == 2 && File.ReadAllBytes(savedPath).SequenceEqual(renewed) && !renewed.SequenceEqual(activeBytes),
-                "Refreshing the active account preserves the renewed credential against the desktop's older local copy.");
-            quota.Block = true;
+            Check(tokenHandler.RefreshCalls == 1 && File.ReadAllBytes(savedPath).SequenceEqual(activeBytes),
+                "A refresh chain owned by the official client is not rotated by the switcher.");
+            quota.RejectOnce = true;
+            try { await client.RefreshAccountCredentialAsync(id, CancellationToken.None); throw new Exception("Expected renewal deferral."); }
+            catch (CredentialRenewalDeferredException) { }
+            Check(tokenHandler.RefreshCalls == 1 && File.ReadAllBytes(Path.Combine(active, "auth.json")).SequenceEqual(activeBytes),
+                "Manual refresh also defers to the official owner without rewriting its login.");
+            var rotated = System.Text.Json.Nodes.JsonNode.Parse(activeBytes)!;
+            rotated["tokens"]!["refresh_token"] = "synthetic-official-rotation";
+            rotated["tokens"]!["access_token"] = "synthetic-official-access";
+            activeBytes = JsonSerializer.SerializeToUtf8Bytes(rotated);
+            File.WriteAllBytes(Path.Combine(active, "auth.json"), activeBytes);
+            await client.RefreshAccountCredentialAsync(id, CancellationToken.None);
+            Check(tokenHandler.RefreshCalls == 1 && File.ReadAllBytes(savedPath).SequenceEqual(activeBytes),
+                "Official token rotation is synchronized into the same saved identity before querying.");
+            quota.RevokedOnce = true;
+            try { await client.RefreshAccountCredentialAsync(id, CancellationToken.None); throw new Exception("Expected revoked authorization."); }
+            catch (QuotaReadException ex) { Check(ex.Message == QuotaReadException.AuthorizationRevoked, "Explicit server revocation is not hidden as pending renewal."); }
+            Check(tokenHandler.RefreshCalls == 1, "Revoked tokens never trigger a renewal attempt.");
+            await client.CommandAsync("add", id); await Until(() => !client.State.IsAddingAccount); await callback;
+            var independentBytes = File.ReadAllBytes(savedPath);
+            Check(!independentBytes.SequenceEqual(activeBytes), "Reauthorization creates a separate saved chain without replacing the official login.");
+            quota.RejectOnce = true;
+            await client.RefreshAccountCredentialAsync(id, CancellationToken.None);
+            Check(tokenHandler.RefreshCalls == 2 && !File.ReadAllBytes(savedPath).SequenceEqual(activeBytes) &&
+                File.ReadAllBytes(Path.Combine(active, "auth.json")).SequenceEqual(activeBytes),
+                "An independent reauthorization renews normally and is not overwritten by the older official chain.");
+            quota.Block = true; quota.Waiting = false;
+            using (var cancellation = new CancellationTokenSource()) {
+                var manual = client.RefreshAccountCredentialAsync(id, cancellation.Token);
+                await Until(() => quota.Waiting); cancellation.Cancel();
+                try { await manual; throw new Exception("Expected cancelled manual read."); } catch (OperationCanceledException) { }
+                Check(!client.State.IsMutating, "A cancelled independent manual read never puts the core in mutation state.");
+            }
+            quota.Waiting = false;
             var refresh = client.CommandAsync("refresh"); await Until(() => quota.Waiting);
             await client.CommandAsync("remove", id).WaitAsync(TimeSpan.FromSeconds(2)); await refresh;
             Check(client.State.Accounts.Length == 0 && client.State.Error == null, "Deletion cancels a blocked native network read and completes locally.");
@@ -137,10 +167,11 @@ internal static class NativeAuthorizationChecks
     }
     private sealed class QuotaHandler : HttpMessageHandler
     {
-        public bool Block, Waiting, RejectOnce;
+        public bool Block, Waiting, RejectOnce, RevokedOnce;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             if (Block) { Waiting = true; await Task.Delay(Timeout.Infinite, ct); }
+            if (RevokedOnce) { RevokedOnce = false; return new(HttpStatusCode.Unauthorized) { Content = new StringContent("{\"error\":{\"code\":\"token_revoked\"}}") }; }
             if (RejectOnce) { RejectOnce = false; return new(HttpStatusCode.Unauthorized) { Content = new StringContent("{}") }; }
             return new(HttpStatusCode.OK) { Content = new StringContent("""{"plan_type":"free","rate_limit":{"primary_window":{"limit_window_seconds":3024000,"used_percent":10,"reset_after_seconds":3600}}}""") };
         }

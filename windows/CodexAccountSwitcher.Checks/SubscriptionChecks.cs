@@ -13,13 +13,14 @@ internal static class SubscriptionChecks
             Console.WriteLine("Subscription checks: parser and plan selection."); ParseChecks(); PlanChecks();
             Console.WriteLine("Subscription checks: synthetic HTTP and login period."); await HttpChecks(); await LoginPeriodChecks();
             Console.WriteLine("Subscription checks: free quota with paid billing metadata."); await GuardedFreePlanChecks();
+            Console.WriteLine("Subscription checks: confirmed free clears old paid dates."); await ConfirmedFreeChecks();
             Console.WriteLine("Subscription checks: guarded reconciliation."); await GuardedChecks();
             Console.WriteLine("Subscription checks: guarded login period."); await GuardedLoginPeriodChecks();
             Console.WriteLine($"PASS: {passed} subscription selection/date/HTTP/cache assertions (synthetic only, GET fixtures)."); return 0;
         } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
     }
     private static string Accounts(string expires = "2026-11-01T08:26:00Z", string plan = "plus") => JsonSerializer.Serialize(new {
-        accounts = new[] { new { account = new { account_id = "workspace", plan_type = "free" }, entitlement = new { subscription_plan = plan, expires_at = expires } } }
+        accounts = new[] { new { account = new { account_id = "workspace", plan_type = plan }, entitlement = new { subscription_plan = plan, expires_at = expires } } }
     });
     private static void ParseChecks()
     {
@@ -107,6 +108,44 @@ internal static class SubscriptionChecks
             try { await reader.ReadAsync(credential, default); throw new Exception("Failed fallback accepted."); }
             catch (SubscriptionReadException) { Require(true, "A failed fallback cannot return the expired check date as a verified subscription."); }
         }
+    }
+    private static async Task ConfirmedFreeChecks()
+    {
+        foreach (var body in new[] {
+            """{"accounts":[{"account":{"account_id":"workspace","plan_type":"free"},"entitlement":null}]}""",
+            """{"accounts":[{"account":{"account_id":"workspace","plan_type":"free"},"entitlement":{"subscription_plan":"plus","expires_at":"2026-11-01T00:00:00Z"}}]}"""
+        }) {
+            var calls = 0;
+            using var reader = new OfficialSubscriptionReader(new Handler(_ => { calls++; return Response(200, body); }), () => Now);
+            var result = await reader.ReadAsync(Credential(null, null, "2099-01-01T00:00:00Z"), default);
+            Require(result.IsConfirmedFree(Now) && result.ActiveUntil == null && calls == 1,
+                "Confirmed Free clears expired paid metadata and does not request the paid subscriptions endpoint.");
+        }
+        var root = Path.Combine(Path.GetTempPath(), "switcher-confirmed-free-" + Guid.NewGuid());
+        var id = Guid.NewGuid();
+        var credential = Credential(null, null, "2099-01-01T00:00:00Z");
+        var profile = Path.Combine(root, "data", "accounts", id.ToString().ToUpperInvariant());
+        Directory.CreateDirectory(profile);
+        var path = Path.Combine(profile, "auth.json"); File.WriteAllBytes(path, credential.Bytes);
+        var state = AccountSnapshot.Empty with { Accounts = [new(new(id, "Fixture", "fixture@example.test"), "F", null, null,
+            Subscription: new(DateTimeOffset.Parse("2099-01-01T00:00:00Z"), Now))] };
+        var runtime = new Runtime(state);
+        var subscription = new Reader((_, _) => Task.FromResult(new SubscriptionLookup("workspace", "free", null, "accounts_check")));
+        try {
+            await using var client = new GuardedAccountClient(Path.Combine(root, "data"), Path.Combine(root, "active"), () => runtime,
+                new Credits(), (_, _) => Task.FromResult(new Usage(100, Now.AddDays(4), null, null, 0, null, "plus")), new Validator(), subscription);
+            await client.InitializeAsync();
+            await Until(() => client.State.Accounts[0].SubscriptionStatus == "verified");
+            Require(client.State.Accounts[0] is { PlanType: "free", Subscription: null },
+                "Confirmed Free overrides stale paid token, runtime snapshot and quota plan.");
+            subscription.Response = (_, _) => throw new IOException("offline");
+            File.AppendAllText(path, "\n"); runtime.Publish(state);
+            Require(client.State.Accounts[0] is { PlanType: "free", Subscription: null },
+                "Changing credential bytes for the same identity cannot revive the old paid expiry.");
+            await client.CommandAsync("refresh", id);
+            Require(client.State.Accounts[0] is { PlanType: "free", Subscription: null },
+                "A failed later lookup preserves confirmed Free without reviving JWT billing dates.");
+        } finally { SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root); }
     }
     private static async Task GuardedFreePlanChecks()
     {
@@ -197,13 +236,15 @@ internal static class SubscriptionChecks
             Require(!lateClient.State.IsMutating, "The pending scheduled billing lookup remains silent until a manual refresh is requested.");
             Console.WriteLine("Subscription checks: queued refresh after a pending response for replaced credentials.");
             var refresh = lateClient.CommandAsync("refresh", lateId);
+            Task? duplicate = null;
             try {
-                Require(!refresh.IsCompleted && lookupCalls == 1 && lateClient.State.IsMutating, "Manual refresh waits for the earlier scheduled billing lookup without overlapping it.");
-                await lateClient.CommandAsync("refresh", lateId).WaitAsync(TimeSpan.FromSeconds(10));
+                Require(!refresh.IsCompleted && lookupCalls == 1 && !lateClient.State.IsMutating, "Manual refresh waits for the earlier scheduled billing lookup without making the page busy.");
+                duplicate = lateClient.CommandAsync("refresh", lateId);
                 Require(lookupCalls == 1, "Repeated refresh cannot queue another billing lookup behind the existing foreground waiter.");
                 File.AppendAllText(Path.Combine(lateProfile, "auth.json"), "\n"); lateRuntime.Publish(lateState);
             } finally { oldLookup.TrySetResult(new("workspace", "pro", actualPast, "subscriptions")); }
             await refresh.WaitAsync(TimeSpan.FromSeconds(10));
+            if (duplicate != null) await duplicate.WaitAsync(TimeSpan.FromSeconds(10));
             await Until(() => !lateClient.State.IsMutating && lookupCalls == 2);
             Require(!sawOldExpired && lateClient.State.Accounts[0].Subscription?.ActiveUntil == freshUntil && lateClient.State.Accounts[0].PlanType == "prolite",
                 "An old in-flight billing result cannot overwrite renewed expiry or incorrectly turn the badge free.");

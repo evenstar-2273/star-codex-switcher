@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -128,6 +128,8 @@ internal static class Program
             var active = All<Button>(window).Single(button => System.Windows.Automation.AutomationProperties.GetName(button) == "personal@example.test");
             active.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Assert(window.IsVisible && client.Commands.Count == 0, "Clicking the active account keeps the window open.");
+            Assert(window.CurrentPage == "restart", "The active account opens restart confirmation without executing it.");
+            window.Navigate("accounts"); Render(window, Path.Combine(output, "accounts-restart-ready.png"));
             Assert(All<TextBlock>(window).Count(text => text.Text.Contains("@example.test")) == 2, "Home must use full emails as account titles.");
             Assert(All<TextBlock>(window).Where(text => text.Text.Contains("@example.test")).All(text =>
                 text.TextWrapping == TextWrapping.NoWrap && text.TextTrimming == TextTrimming.CharacterEllipsis && Equals(text.ToolTip, text.Text)),

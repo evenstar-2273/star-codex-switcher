@@ -118,16 +118,27 @@ public sealed class DesktopController(Func<CancellationToken, Task<DesktopInstal
             if (processes.Count == 0) return;
             // Keep handles to descendants as well: Kill(true) and waiting for the root alone
             // do not guarantee its app-server children have exited before auth.json changes.
+            var rootCount = processes.Count;
             DesktopProcessTree.IncludeDescendants(processes);
+            var stopwatch = Stopwatch.StartNew();
             cancellationToken.ThrowIfCancellationRequested();
-            foreach (var process in processes)
+            foreach (var process in processes.Take(rootCount))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+                try { if (!process.HasExited) process.Kill(entireProcessTree: false); }
                 catch (InvalidOperationException) when (process.HasExited) { }
                 catch (System.ComponentModel.Win32Exception) when (process.HasExited) { }
             }
-            var stopwatch = Stopwatch.StartNew();
+            // The captured handles pin identity even after the UI parent exits.
+            // Avoid recursive Chromium tree termination; wait briefly for natural backend exit.
+            if (processes.Skip(rootCount).Any(process => !process.HasExited))
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(500, exitTimeout.TotalMilliseconds)), cancellationToken);
+            foreach (var process in processes.Skip(rootCount)) {
+                cancellationToken.ThrowIfCancellationRequested();
+                try { if (!process.HasExited) process.Kill(entireProcessTree: false); }
+                catch (InvalidOperationException) when (process.HasExited) { }
+                catch (System.ComponentModel.Win32Exception) when (process.HasExited) { }
+            }
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();

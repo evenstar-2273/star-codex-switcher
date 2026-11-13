@@ -6,7 +6,10 @@ using System.Text.RegularExpressions;
 
 namespace CodexAccountSwitcher.Core;
 
-public sealed record SubscriptionLookup(string? AccountID, string? PlanType, DateTimeOffset? ActiveUntil, string Source, bool IsVerified = true);
+public sealed record SubscriptionLookup(string? AccountID, string? PlanType, DateTimeOffset? ActiveUntil, string Source, bool IsVerified = true) {
+    public bool IsConfirmedFree(DateTimeOffset now) => IsVerified && Source == "accounts_check" &&
+        SubscriptionPlan.NormalizeBillingPlan(PlanType) == "free" && (ActiveUntil == null || ActiveUntil <= now);
+}
 
 public interface ISubscriptionReader
 {
@@ -32,7 +35,8 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
         ct.ThrowIfCancellationRequested();
         var offset = -(int)TimeZoneInfo.Local.GetUtcOffset(now()).TotalMinutes;
         var accounts = await GetAsync(CheckPath, "timezone_offset_min=" + offset.ToString(CultureInfo.InvariantCulture), credential, ct);
-        var selected = ParseAccountCheck(accounts, credential.AccountID, credential.OrganizationID);
+        var selected = ParseAccountCheck(accounts, credential.AccountID, credential.OrganizationID, now());
+        if (selected.IsConfirmedFree(now())) return selected with { ActiveUntil = null };
         if (selected.ActiveUntil > now()) return selected;
         var accountId = selected.AccountID ?? credential.AccountID;
         var subscriptions = await GetAsync(SubscriptionPath, "account_id=" + Uri.EscapeDataString(accountId), credential, ct);
@@ -63,7 +67,7 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
     }
 
     private sealed record AccountCandidate(string? Key, string? AccountID, string? Plan, DateTimeOffset? Expiry, bool IsDefault);
-    public static SubscriptionLookup ParseAccountCheck(string json, string? accountId, string? organizationId = null)
+    public static SubscriptionLookup ParseAccountCheck(string json, string? accountId, string? organizationId = null, DateTimeOffset? now = null)
     {
         try {
             using var document = JsonDocument.Parse(json);
@@ -83,6 +87,9 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
                 var entitlement = Field(row, "entitlement");
                 var plan = entitlement is { } ent ? Text(ent, "subscription_plan") : null;
                 var expiry = entitlement is { } grant ? SubscriptionDate.Parse(Field(grant, "expires_at")) : null;
+                expiry ??= SubscriptionDate.Parse(Field(account, "expires_at"));
+                var accountPlan = Text(account, "plan_type", "planType");
+                if (SubscriptionPlan.NormalizeBillingPlan(accountPlan) == "free" && expiry <= (now ?? DateTimeOffset.UtcNow)) plan = accountPlan;
                 records.Add(new(key, Text(account, "account_id", "id", "chatgpt_account_id", "workspace_id"),
                     plan ?? Text(account, "plan_type", "planType"), expiry ?? SubscriptionDate.Parse(Field(account, "expires_at")),
                     Field(account, "is_default") is { ValueKind: JsonValueKind.True }));
@@ -163,7 +170,7 @@ public static class SubscriptionPlan
         if (!string.IsNullOrWhiteSpace(usagePlan)) return usagePlan.Trim();
         return NormalizeBillingPlan(subscriptionPlan) ?? NormalizeBillingPlan(tokenPlan);
     }
-    private static string? NormalizeBillingPlan(string? value)
+    internal static string? NormalizeBillingPlan(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
         return value.Trim().ToLowerInvariant() switch {

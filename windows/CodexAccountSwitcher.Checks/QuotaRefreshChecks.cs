@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text.Json;
 using CodexAccountSwitcher.Core;
@@ -11,6 +11,7 @@ internal static class QuotaRefreshChecks
     {
         try {
             await ManagedAsync();
+            await IndependentReadsAsync();
             await InitialResetCycleAsync();
             await SilentDeleteAsync();
             await AuthenticationGuardAsync();
@@ -179,7 +180,7 @@ internal static class QuotaRefreshChecks
         Check(fixture.TotalReads == 12, "Manual refresh consumes its resulting host revision and is not repeated by the completion snapshot.");
         var before = fixture.Reads.ToDictionary(item => item.Key, item => item.Value);
         await client.CommandAsync("refresh", fixture.IDs[0]); await Idle(client);
-        Check(fixture.IDs.All(id => fixture.Reads[id] == before[id] + 1), "Targeted manual refresh consumes only its account; another account's pending host revision is still serviced once.");
+        Check(fixture.Reads[fixture.IDs[0]] == before[fixture.IDs[0]] + 1 && fixture.Reads[fixture.IDs[1]] == before[fixture.IDs[1]], "A targeted refresh only queries the selected account without triggering a host-wide cycle.");
 
         fixture.ReadGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
         fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = fixture.Runtime.State.UsageRefreshRevision + 1 });
@@ -221,6 +222,25 @@ internal static class QuotaRefreshChecks
         Check(fixture.TotalReads == readsBeforeCredentialChange + 1, "Credential replacement still forces an initial read independently of the periodic setting.");
         Check(File.ReadAllBytes(fixture.ActiveCredential).SequenceEqual(fixture.OriginalBytes), "All scheduling tests preserve the active authentication bytes.");
     }
+    private static async Task IndependentReadsAsync() {
+        using var fixture = new Fixture();
+        await using var client = fixture.Client; await client.InitializeAsync(); await Idle(client);
+        var before = fixture.TotalReads;
+        fixture.ReadGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = client.CommandAsync("refresh", fixture.IDs[0]);
+        await Until(() => fixture.ActiveReads == 1);
+        var duplicate = client.CommandAsync("refresh", fixture.IDs[0]);
+        var second = client.CommandAsync("refresh", fixture.IDs[1]);
+        await Until(() => fixture.ActiveReads == 2);
+        var all = client.CommandAsync("refresh");
+        Check(fixture.TotalReads == before + 2 && !client.State.IsMutating, "Different accounts read concurrently; repeated same-account reads join one request without global busy state.");
+        await client.CommandAsync("quotaRefreshInterval", language: "15").WaitAsync(TimeSpan.FromSeconds(1));
+        Check(client.State.Settings.QuotaRefreshIntervalMinutes == 15, "Settings remain actionable during two held manual reads.");
+        await client.CommandAsync("remove", fixture.IDs[0]).WaitAsync(TimeSpan.FromSeconds(1));
+        Check(client.State.Accounts.All(row => row.Profile.Id != fixture.IDs[0]), "Account removal does not wait for independent manual network reads.");
+        fixture.ReadGate.SetResult(); await Task.WhenAll(first, duplicate, second, all); fixture.ReadGate = null; await Idle(client);
+        Check(client.State.Accounts.All(row => row.Profile.Id != fixture.IDs[0]) && !client.State.IsMutating, "Late manual results cannot restore a deleted account or leave busy state.");
+    }
     private static async Task SilentDeleteAsync()
     {
         using var fixture = new Fixture();
@@ -249,7 +269,7 @@ internal static class QuotaRefreshChecks
         fixture.ReadGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
         fixture.Runtime.Publish(fixture.Runtime.State with { UsageRefreshRevision = 4 }); await Until(() => fixture.ActiveReads == 1);
         var manual = client.CommandAsync("refresh"); await Task.Delay(30);
-        Check(!manual.IsCompleted && client.State.IsMutating, "Manual refresh waits behind the timer instead of silently losing the user's click.");
+        Check(!manual.IsCompleted && !client.State.IsMutating, "A read queued behind the same account timer remains non-mutating and does not disable UI.");
         fixture.ReadGate.SetResult(); await manual; fixture.ReadGate = null; await Idle(client);
         Check(!client.State.IsMutating, "The foreground refresh releases its busy state after the actual readback completes.");
     }

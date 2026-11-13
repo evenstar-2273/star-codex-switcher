@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Reflection;
 using CodexAccountSwitcher.Core;
 
@@ -16,9 +16,9 @@ internal static class CommandCoordinationChecks
     public static async Task VerifyAsync() {
         passed = 0;
         Console.WriteLine("Command coordination: initialization ownership and queued cancellation.");
-        foreach (var command in new[] { "add", "refresh", "remove" }) await DuringAcquisitionAsync(command);
+        foreach (var command in new[] { "add", "remove" }) await DuringAcquisitionAsync(command);
         Console.WriteLine("Command coordination: background completion boundary.");
-        foreach (var command in new[] { "add", "refresh", "remove" })
+        foreach (var command in new[] { "add", "remove" })
             for (var iteration = 0; iteration < 32; iteration++) await DuringCompletionAsync(command);
         Console.WriteLine("Command coordination: shutdown with a foreground waiter.");
         await ShutdownAsync();
@@ -75,14 +75,14 @@ internal static class CommandCoordinationChecks
         Task? queued = null;
         try {
             await client.InitializeAsync(); await fixture.ReadStarted.Task.WaitAsync(Deadline);
-            queued = client.CommandAsync("refresh");
+            queued = client.CommandAsync("language", language: "simplifiedChinese");
             Check(!queued.IsCompleted && client.State.IsMutating, "Shutdown fixture has a real foreground waiter behind a pending read.");
         } finally {
             await client.DisposeAsync().AsTask().WaitAsync(Deadline);
             fixture.ReadGate.TrySetResult();
         }
         await queued!.WaitAsync(Deadline);
-        Check(fixture.Runtime.Count("refresh") == 0 && fixture.Runtime.Disposed,
+        Check(fixture.Runtime.Count("language") == 0 && fixture.Runtime.Disposed,
             "Shutdown cancels the pending read and reservation without starting a new login or deadlocking disposal.");
         fixture.CheckCredential();
     }

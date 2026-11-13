@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -183,22 +183,9 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
                     var login = LoginCredential.Read(credentialPath);
                     using (var usageReader = NativeUsageFactory())
                     using (var creditReader = NativeCreditsFactory()) {
-                        Usage usage;
-                        try { usage = await usageReader.ReadAsync(login, cancellation.Token); }
-                        catch (QuotaReadException ex) when (QuotaReadException.IsAuthenticationFailure(ex.Message)) {
-                            using var authorization = AuthorizationFactory();
-                            // Token rotation must finish even if a read is cancelled; persist only to a still-live, unchanged profile.
-                            var refreshed = await authorization.RefreshAsync(login, lifetime.Token);
-                            var writeGate = profileWrites.GetOrAdd(profileId, _ => new(1));
-                            await writeGate.WaitAsync(lifetime.Token);
-                            try {
-                                if (deletedAccounts.ContainsKey(profileId) || !File.Exists(credentialPath) || !LoginCredential.Read(credentialPath).Bytes.SequenceEqual(login.Bytes))
-                                    throw new IOException("账号凭据已变化，已停止写回，请刷新重试。");
-                                PersistRefreshedCredential(credentialPath, login, refreshed);
-                            } finally { writeGate.Release(); }
-                            login = refreshed;
-                            usage = await usageReader.ReadAsync(login, cancellation.Token);
-                        }
+                        var nativeResult = await ReadNativeUsageAsync(profileId, credentialPath, usageReader, cancellation.Token);
+                        login = nativeResult.Login;
+                        var usage = nativeResult.Usage;
                         ResetCreditSnapshot? credits = null;
                         try { credits = await creditReader.ReadAsync(login, cancellation.Token); }
                         catch (ResetCreditException) { }
@@ -241,6 +228,63 @@ public sealed class CoreClient : IAccountClient, IAsyncDisposable
     }
 
     private static string? WireDate(DateTimeOffset? value) => value?.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> nativeUsageGates = new();
+    internal async Task RefreshAccountCredentialAsync(Guid id, CancellationToken ct) {
+        using var reader = NativeUsageFactory();
+        await ReadNativeUsageAsync(id, Path.Combine(profilesPath, id.ToString().ToUpperInvariant(), "auth.json"), reader, ct);
+    }
+    private async Task<(LoginCredential Login, Usage Usage)> ReadNativeUsageAsync(Guid profileId, string credentialPath, OfficialUsageReader usageReader, CancellationToken ct) {
+        var readGate = nativeUsageGates.GetOrAdd(profileId, _ => new(1));
+        await readGate.WaitAsync(ct);
+        try {
+            if (deletedAccounts.ContainsKey(profileId)) throw new IOException("该账号已删除。");
+            var login = LoginCredential.Read(credentialPath);
+            login = await SyncOfficialCredentialAsync(profileId, credentialPath, login, ct);
+            Usage usage;
+            try { usage = await usageReader.ReadAsync(login, ct); }
+            catch (QuotaReadException ex) when (QuotaReadException.IsAuthenticationFailure(ex.Message) && ex.Message != QuotaReadException.AuthorizationRevoked) {
+                // The default desktop/CLI owns a refresh chain still present in its auth store.
+                // Never rotate that chain behind its back, even when the desktop is currently closed.
+                if (CredentialRefreshPolicy.Owns(activeCredentialPath, login)) throw new CredentialRenewalDeferredException();
+                using var authorization = AuthorizationFactory();
+                // Token rotation must finish even if a read is cancelled; persist only to a still-live, unchanged profile.
+                var refreshed = await authorization.RefreshAsync(login, lifetime.Token);
+                var writeGate = profileWrites.GetOrAdd(profileId, _ => new(1));
+                await writeGate.WaitAsync(lifetime.Token);
+                try {
+                    if (deletedAccounts.ContainsKey(profileId) || !File.Exists(credentialPath) || !LoginCredential.Read(credentialPath).Bytes.SequenceEqual(login.Bytes))
+                        throw new IOException("账号凭据已变化，已停止写回，请刷新重试。");
+                    PersistRefreshedCredential(credentialPath, login, refreshed);
+                } finally { writeGate.Release(); }
+                login = refreshed;
+                usage = await usageReader.ReadAsync(login, ct);
+            }
+
+            return (login, usage);
+        } finally { readGate.Release(); }
+    }
+    private async Task<LoginCredential> SyncOfficialCredentialAsync(Guid id, string path, LoginCredential saved, CancellationToken ct) {
+        if (!File.Exists(activeCredentialPath)) return saved;
+        var live = LoginCredential.Read(activeCredentialPath);
+        if (!CredentialRefreshPolicy.SameIdentity(live, saved) || live.Bytes.SequenceEqual(saved.Bytes)) return saved;
+        var markerPath = Path.Combine(Path.GetDirectoryName(path)!, "reauthorization-live.json");
+        SecureFiles.RejectLinks(markerPath);
+        if (File.Exists(markerPath)) {
+            static string Hash(byte[] bytes) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+            var markers = JsonSerializer.Deserialize<CredentialMarker[]>(File.ReadAllBytes(markerPath), AccountSnapshot.JsonOptions) ?? [];
+            if (markers.Any(marker => marker.PreviousLive == Hash(live.Bytes) && marker.SavedCredential == Hash(saved.Bytes))) return saved;
+        }
+        var gate = profileWrites.GetOrAdd(id, _ => new(1));
+        await gate.WaitAsync(ct);
+        try {
+            if (deletedAccounts.ContainsKey(id) || !File.Exists(path) || !LoginCredential.Read(path).Bytes.SequenceEqual(saved.Bytes))
+                throw new IOException("账号凭据已变化，请稍后刷新。");
+            if (!File.Exists(activeCredentialPath) || !LoginCredential.Read(activeCredentialPath).Bytes.SequenceEqual(live.Bytes))
+                throw new IOException("Codex 正在更新登录凭据，请稍后刷新。");
+            SecureFiles.AtomicWrite(path, live.Bytes);
+            return live;
+        } finally { gate.Release(); }
+    }
     private void PersistRefreshedCredential(string path, LoginCredential previous, LoginCredential refreshed)
     {
         if (File.Exists(activeCredentialPath)) {

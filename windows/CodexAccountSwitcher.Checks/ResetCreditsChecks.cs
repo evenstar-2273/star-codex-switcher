@@ -77,6 +77,13 @@ internal static class ResetCreditsChecks
         var parsed = OfficialResetCredits.Parse(payload, Now);
         Require(parsed.AvailableCount == 2 && parsed.EarliestExpiry == DateTimeOffset.Parse("2026-11-07T00:00:00Z"), "Nested count and earliest available expiry.");
         Require(parsed.Credits?.Length == 2 && parsed.Credits.All(c => c.ResetType == "codexRateLimits"), "Available card identities and expiry are retained for native automatic reset scheduling.");
+        foreach (var key in new[] { "granted_at", "created_at", "grantedAt" }) {
+            var details = OfficialResetCredits.Parse(JsonSerializer.Serialize(new { credits = new[] { new Dictionary<string, object> {
+                ["id"] = "grant", ["status"] = "available", ["expires_at"] = "2026-12-01T00:00:00Z", [key] = "2026-11-01T02:43:00Z"
+            } } }), Now);
+            Require(details.Credits?.Single().GrantedAt == DateTimeOffset.Parse("2026-11-01T02:43:00Z"), "Grant timestamps retain the exact instant across supported server aliases.");
+        }
+        Require(parsed.Credits!.All(card => card.GrantedAt == null), "Missing grant dates stay unknown rather than being inferred from expiry.");
         var otherType = OfficialResetCredits.Parse("""{"credits":[{"id":"other","type":"futureProduct","status":"available","expires_at":"2026-12-01T00:00:00Z"}]}""", Now);
         Require(otherType.Credits?.Single().ResetType == "futureProduct", "Other reset types cannot be promoted to Codex automatic resets.");
         Require(OfficialResetCredits.Parse("""{"credits":[{"id":"http-card","type":"rate_limit_reset","status":"available","expires_at":"2026-12-01T00:00:00Z"}]}""", Now).Credits?.Single().ResetType == "codexRateLimits",
@@ -154,6 +161,8 @@ internal static class ResetCreditsChecks
         await using (var client = fixture.Client()) {
             await client.InitializeAsync();
             await Until(() => client.State.Accounts[0].Usage?.ResetCreditsRemaining == 3);
+            Require(client.State.Accounts[0].Usage?.ResetCards is { Length: 3 } details && details[0].GrantedAt == Now.AddDays(-2),
+                "Official credit details and grant dates reach the displayed account state.");
             Require(client.State.Accounts[0].Usage?.RemainingPercent == 42 && client.State.Accounts[0].PlanType == "future-plan", "Fresh official quota/plan override stale Swift snapshots.");
             var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); credits.Gate = gate;
             var reset = client.CommandAsync("resetQuota", fixture.Id);
@@ -166,6 +175,7 @@ internal static class ResetCreditsChecks
             await reset.WaitAsync(TimeSpan.FromSeconds(10));
             Require(fixture.Starts == 2 && fixture.Stops == 1 && fixture.Running == 1, "The host restarts after reset.");
             Require(client.State.Accounts[0].Usage?.ResetCreditsRemaining == 2 && client.State.Accounts[0].Usage?.RemainingPercent == 100, "Success refreshes both balance and quota.");
+            Require(client.State.Accounts[0].Usage?.ResetCards?.Length == 2, "Successful reset replaces the list with the remaining official cards.");
             fixture.LastRuntime!.Publish(fixture.Snapshot);
             Require(client.State.Accounts[0].Usage?.ResetCreditsRemaining == 2, "An older host snapshot cannot replace the fresh balance.");
             Require(File.ReadAllBytes(fixture.ActiveCredential).SequenceEqual(fixture.OriginalBytes), "Reset never changes the active login file.");
@@ -173,6 +183,7 @@ internal static class ResetCreditsChecks
             credits.Gate = null; credits.Uncertain = true;
             await client.CommandAsync("resetQuota", fixture.Id);
             Require(client.State.Accounts[0].Usage?.ResetCreditsRemaining == null && client.State.Error?.Contains("未确认") == true, "An uncertain POST hides the old spendable balance.");
+            Require(client.State.Accounts[0].Usage?.ResetCards == null, "An uncertain consume cannot leave stale cards labelled available.");
             var previous = credits.Consumes;
             await client.CommandAsync("resetQuota", fixture.Id);
             Require(credits.Consumes == previous, "An uncertain reset requires explicit refresh before another consume.");
@@ -192,18 +203,20 @@ internal static class ResetCreditsChecks
 
         using var stale = new ClientFixture();
         var delayed = new TaskCompletionSource<Usage>(TaskCreationOptions.RunContinuationsAsynchronously); var reads = 0;
-        Console.WriteLine("Reset checks: reset queued behind a silent scheduled read.");
+        Console.WriteLine("Reset checks: reset cancels a silent scheduled read.");
+        var consumeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        stale.Credits.Gate = consumeGate;
         await using (var client = stale.Client((_, ct) => ++reads == 1 ? delayed.Task.WaitAsync(ct) : Task.FromResult(stale.Usage(100)))) {
             await client.InitializeAsync(); await Until(() => reads == 1);
             Require(!client.State.IsMutating, "An in-flight scheduled read is silent until a foreground operation is requested.");
             var reset = client.CommandAsync("resetQuota", stale.Id);
             try {
-                await Until(() => client.State.IsMutating);
-                Require(!reset.IsCompleted && stale.Credits.Consumes == 0 && stale.Running == 1,
-                    "The requested reset waits behind the scheduled read without stopping the host or consuming a credit.");
+                await Until(() => stale.Credits.Consumes == 1);
+                Require(!reset.IsCompleted && client.State.IsMutating && stale.Running == 0 && !delayed.Task.IsCompleted,
+                    "Reset cancels the pending scheduled query and safely stops the host before one consume.");
                 await client.CommandAsync("resetQuota", stale.Id).WaitAsync(TimeSpan.FromSeconds(10));
-                Require(stale.Credits.Consumes == 0, "A repeated reset cannot queue a second consume while the first reset waits.");
-            } finally { delayed.TrySetResult(stale.Usage(4)); }
+                Require(stale.Credits.Consumes == 1, "A repeated reset cannot queue a second consume while the first reset waits.");
+            } finally { delayed.TrySetResult(stale.Usage(4)); consumeGate.TrySetResult(); }
             await reset.WaitAsync(TimeSpan.FromSeconds(10));
             Require(stale.Credits.Consumes == 1 && !client.State.IsMutating && client.State.Accounts[0].Usage?.RemainingPercent == 100 && client.State.Accounts[0].Usage?.ResetCreditsRemaining == 2,
                 "The queued reset runs once after the read completes and publishes fresh quota and the consumed credit balance.");
@@ -278,7 +291,8 @@ internal static class ResetCreditsChecks
         public Task<ResetCreditSnapshot> ReadAsync(LoginCredential credential, CancellationToken ct) {
             Reads++;
             if (FailReadsAfterConsume && Consumes > 0) throw new IOException("SECRET_TOKEN details");
-            return Task.FromResult(new ResetCreditSnapshot(Available, Now.AddDays(2)));
+            return Task.FromResult(new ResetCreditSnapshot(Available, Now.AddDays(2), Enumerable.Range(0, Available)
+                .Select(index => new BankedCredit("fixture-" + index, "available", "codexRateLimits", Now.AddDays(2 + index), Now.AddDays(-2))).ToArray()));
         }
         public async Task ConsumeAsync(LoginCredential credential, CancellationToken ct) {
             Require(fixture.Running == 0, "No Swift auto-reset process runs during a consume.");
@@ -297,6 +311,9 @@ internal static class ResetCreditsChecks
         public Task CommandAsync(string command, Guid? accountID = null, bool? value = null, string? language = null) {
             if (command == "refresh") { fixture.Refreshes++; fixture.RefreshAction?.Invoke(this); }
             return Task.CompletedTask;
+        }
+        public Task RefreshAccountCredentialAsync(Guid id, CancellationToken ct) {
+            fixture.Refreshes++; fixture.RefreshAction?.Invoke(this); return Task.CompletedTask;
         }
         public ValueTask DisposeAsync() {
             if (fixture.FailStopOnce) { fixture.FailStopOnce = false; throw new IOException("SECRET_TOKEN stop"); }

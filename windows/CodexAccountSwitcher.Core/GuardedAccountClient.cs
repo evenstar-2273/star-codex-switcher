@@ -38,10 +38,16 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
     private int usageGeneration;
     private readonly object usageStateLock = new();
     private readonly SemaphoreSlim usageReads = new(4);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> accountReads = new();
+    private readonly Dictionary<Guid, Task> manualReads = new();
+    private readonly Dictionary<Guid, CancellationTokenSource> manualReadCancellation = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> planHints = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> credentialFingerprints = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> resetNeedsRefresh = new();
-    private sealed record SubscriptionEntry(SubscriptionSnapshot? Snapshot, string? PlanType, string Status, string? Error, DateTimeOffset At);
+    private sealed record SubscriptionEntry(SubscriptionSnapshot? Snapshot, string? PlanType, string Status, string? Error, DateTimeOffset At, string? Identity = null) {
+        public bool ConfirmedFree => Status == "verified" && Snapshot == null && PlanType == "free";
+    }
+    private static string SubscriptionIdentity(LoginCredential credential) => credential.AccountID + "|" + credential.OrganizationID;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SubscriptionEntry> subscriptions = new();
     public AccountSnapshot State {
         get {
@@ -53,17 +59,17 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
                     var current = directUsage.TryGetValue(row.Profile.Id, out var entry)
                         ? row with { Usage = entry.Usage ?? row.Usage, UsageError = entry.Error, UsageStatus = entry.Usage != null ? "loaded" : row.Usage != null ? row.UsageStatus : "unavailable" }
                         : row;
-                    if ((entry.UnknownCredits || resetNeedsRefresh.ContainsKey(row.Profile.Id)) && current.Usage is { } knownUsage) current = current with { Usage = knownUsage with { ResetCreditsRemaining = null, ResetCreditsExpireAt = null } };
+                    if ((entry.UnknownCredits || resetNeedsRefresh.ContainsKey(row.Profile.Id)) && current.Usage is { } knownUsage) current = current with { Usage = knownUsage with { ResetCreditsRemaining = null, ResetCreditsExpireAt = null, ResetCards = null } };
                     var hasSubscription = subscriptions.TryGetValue(row.Profile.Id, out var subscription);
                     var status = subscription?.Status ?? (directUsageEnabled ? "checking" : "unverified");
                     var snapshot = subscription?.Snapshot;
-                    if (!hasSubscription || status == "checking" && snapshot == null)
+                    if (subscription?.ConfirmedFree != true && (!hasSubscription || status == "checking" && snapshot == null))
                         snapshot = row.Subscription?.ActiveUntil > DateTimeOffset.UtcNow ? row.Subscription with { IsVerified = false } : null;
                     if (status != "verified" && snapshot?.ActiveUntil <= DateTimeOffset.UtcNow) snapshot = null;
                     var actualExpiry = status == "verified" && snapshot?.IsVerified == true ? snapshot.ActiveUntil : (DateTimeOffset?)null;
                     return current with {
                         Subscription = snapshot, SubscriptionStatus = status, SubscriptionError = subscription?.Error,
-                        PlanType = SubscriptionPlan.Resolve(subscription?.Status == "verified" ? subscription.PlanType : null, entry.ReportedPlan ?? entry.Usage?.PlanType,
+                        PlanType = subscription?.ConfirmedFree == true ? "free" : SubscriptionPlan.Resolve(subscription?.Status == "verified" ? subscription.PlanType : null, entry.ReportedPlan ?? entry.Usage?.PlanType,
                             subscription?.PlanType ?? planHints.GetValueOrDefault(row.Profile.Id) ?? current.Usage?.PlanType ?? row.PlanType, actualExpiry)
                             ?? (entry.Usage?.Windows is { Length: > 0 } ? "free" : null)
                     };
@@ -126,9 +132,11 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
     }
     private async Task<string?> RefreshDirectUsageAsync(Guid id, int generation, bool afterReset = false, bool reconcileReset = false, bool quiet = false, CancellationToken? cancellation = null) {
         var ct = cancellation ?? usageLifetime.Token;
-        var entered = false;
+        var entered = false; var accountEntered = false;
+        var accountRead = accountReads.GetOrAdd(id, _ => new(1));
         Task? subscriptionTask = null;
         try {
+            await accountRead.WaitAsync(ct); accountEntered = true;
             await usageReads.WaitAsync(ct); entered = true;
             if (generation != Volatile.Read(ref usageGeneration)) return null;
             var path = CredentialPath(id);
@@ -146,7 +154,11 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
             Usage? fresh = null; string? failure = null; var creditsConfirmed = false;
             try { fresh = await usageReader(credential, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (QuotaReadException ex) { failure = ex.Message; reportedPlan = ex.PlanType; }
+            catch (QuotaReadException ex) {
+                failure = ex.Message; reportedPlan = ex.PlanType;
+                if (QuotaReadException.IsAuthenticationFailure(failure) && failure != QuotaReadException.AuthorizationRevoked && CredentialRefreshPolicy.Owns(Path.Combine(activeHome, "auth.json"), credential))
+                    failure = CredentialRefreshPolicy.Deferred;
+            }
             catch { failure = "读取额度失败，请检查网络后重试。"; }
             reportedPlan ??= fresh != null ? fresh.PlanType : directUsage.GetValueOrDefault(id).ReportedPlan;
             fresh ??= directUsage.GetValueOrDefault(id).Usage ?? State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage;
@@ -154,7 +166,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
                 var credits = await resetCredits.ReadAsync(credential, ct);
                 creditsConfirmed = credits.AvailableCount.HasValue;
                 fresh ??= State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage;
-                if (fresh != null) fresh = fresh with { ResetCreditsRemaining = credits.AvailableCount ?? fresh.ResetCreditsRemaining, ResetCreditsExpireAt = credits.EarliestExpiry };
+                if (fresh != null) fresh = fresh with { ResetCreditsRemaining = credits.AvailableCount ?? fresh.ResetCreditsRemaining, ResetCreditsExpireAt = credits.EarliestExpiry, ResetCards = credits.Credits };
             } catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch { failure ??= "额度已读取，但重置次数明细暂时不可用。"; }
             lock (usageStateLock) {
@@ -173,6 +185,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
         } finally {
             if (subscriptionTask != null) await subscriptionTask;
             if (entered) usageReads.Release();
+            if (accountEntered) accountRead.Release();
         }
     }
     private async Task RefreshSubscriptionAsync(Guid id, LoginCredential credential, int generation, bool force, bool quiet, CancellationToken ct) {
@@ -181,25 +194,26 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
         if (previous != null && !ShouldRefreshSubscription(previous.Status, previous.Snapshot, previous.At, checkedAt, force)) return;
         lock (usageStateLock) {
             if (generation != usageGeneration) return;
-            if (!quiet || previous == null) subscriptions[id] = new(previous?.Snapshot, previous?.PlanType, "checking", null, previous?.At ?? checkedAt);
+            if (!quiet || previous == null) subscriptions[id] = previous?.ConfirmedFree == true ? previous : new(previous?.Snapshot, previous?.PlanType, "checking", null, previous?.At ?? checkedAt);
         }
         SubscriptionEntry next;
         // A failed check may keep a valid snapshot, but never certify it as fresh.
         // Prefer the last server date over the older date embedded in login credentials.
-        SubscriptionSnapshot? Retained() => previous?.Snapshot is { } last && last.ActiveUntil > checkedAt ? last
+        SubscriptionSnapshot? Retained() => previous?.ConfirmedFree == true ? null : previous?.Snapshot is { } last && last.ActiveUntil > checkedAt ? last
             : credential.SubscriptionActiveUntil is { } until && until > checkedAt
                 ? new SubscriptionSnapshot(until, checkedAt, "login_snapshot", false) : null;
         try {
             var result = await subscriptionReader.ReadAsync(credential, ct);
             var snapshot = result.ActiveUntil is { } until ? new SubscriptionSnapshot(until, checkedAt, result.Source, result.IsVerified) : null;
             var retained = Retained();
-            next = snapshot != null ? new(snapshot, result.PlanType, result.IsVerified ? "verified" : "login_snapshot", null, checkedAt)
+            next = result.IsConfirmedFree(checkedAt) ? new(null, "free", "verified", null, checkedAt, SubscriptionIdentity(credential)) : snapshot != null ? new(snapshot, result.PlanType, result.IsVerified ? "verified" : "login_snapshot", null, checkedAt)
+                : previous?.ConfirmedFree == true && result.PlanType == null ? previous with { Error = "订阅状态暂未刷新，请稍后重试。" }
                 : new(retained, result.PlanType ?? previous?.PlanType, retained == null ? "unavailable" : "stale",
                     "官方订阅接口暂未返回有效期，请稍后刷新核验。", checkedAt);
         } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
         catch {
             var retained = Retained();
-            next = new(retained, previous?.PlanType, retained == null ? "unavailable" : "stale",
+            next = previous?.ConfirmedFree == true ? previous with { Error = "订阅状态暂未刷新，请稍后重试。" } : new(retained, previous?.PlanType, retained == null ? "unavailable" : "stale",
                 "订阅有效期尚未核验，请检查网络或重新授权后刷新。", checkedAt);
         }
         lock (usageStateLock) {
@@ -226,17 +240,18 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
         foreach (var row in core.State.Accounts) {
             var id = row.Profile.Id;
             if (!credentialFingerprints.TryGetValue(id, out var observed)) continue;
-            string? current = null;
+            string? current = null; string? identity = null;
             try {
                 var path = CredentialPath(id); SecureFiles.RejectLinks(path);
-                if (File.Exists(path) && new FileInfo(path).Length <= 1024 * 1024) current = Fingerprint(File.ReadAllBytes(path));
+                if (File.Exists(path) && new FileInfo(path).Length <= 1024 * 1024) { var credential = LoginCredential.Read(path); current = Fingerprint(credential.Bytes); identity = SubscriptionIdentity(credential); }
             } catch (IOException) { }
             catch (UnauthorizedAccessException) { }
             if (current == observed) continue;
             lock (usageStateLock) {
                 if (credentialFingerprints.TryGetValue(id, out var latest) && latest == observed) {
                     ++usageGeneration;
-                    credentialFingerprints.TryRemove(id, out _); planHints.TryRemove(id, out _); directUsage.TryRemove(id, out _); usageRevisions.TryRemove(id, out _); subscriptions.TryRemove(id, out _);
+                    credentialFingerprints.TryRemove(id, out _); planHints.TryRemove(id, out _); directUsage.TryRemove(id, out _); usageRevisions.TryRemove(id, out _);
+                    if (!subscriptions.TryGetValue(id, out var verified) || !verified.ConfirmedFree || verified.Identity != identity) subscriptions.TryRemove(id, out _);
                 }
             }
         }
@@ -273,8 +288,8 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
 
     internal GuardedAccountClient(string dataPath, string activeHome, Func<IAccountRuntime> runtimeFactory,
         IResetCreditService resetCredits, Func<LoginCredential, CancellationToken, Task<Usage>> usageReader, ILoginValidator validator,
-        ISubscriptionReader? subscriptionReader = null, TimeSpan? loginCancellationTimeout = null)
-        : this("", dataPath, activeHome, validator: validator, resetCredits: resetCredits, usageReader: usageReader, subscriptionReader: subscriptionReader ?? new EmptySubscriptionReader())
+        ISubscriptionReader? subscriptionReader = null, TimeSpan? loginCancellationTimeout = null, IDesktopOperations? desktop = null)
+        : this("", dataPath, activeHome, desktop: desktop, validator: validator, resetCredits: resetCredits, usageReader: usageReader, subscriptionReader: subscriptionReader ?? new EmptySubscriptionReader())
     {
         this.runtimeFactory = runtimeFactory;
         if (loginCancellationTimeout is { } timeout) this.loginCancellationTimeout = timeout;
@@ -322,7 +337,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
         } catch (Exception ex) {
             if (ex is not ResetCreditException || ((ResetCreditException)ex).OutcomeUncertain) resetNeedsRefresh[id] = 0;
             var knownCount = (ex as ResetCreditException)?.AvailableCount;
-            directUsage[id] = (account.Usage is { } prior ? prior with { ResetCreditsRemaining = knownCount, ResetCreditsExpireAt = null } : null,
+            directUsage[id] = (account.Usage is { } prior ? prior with { ResetCreditsRemaining = knownCount, ResetCreditsExpireAt = null, ResetCards = null } : null,
                 "请刷新次数和额度核对。", DateTimeOffset.UtcNow, knownCount == null, account.PlanType);
             error = ex is ResetCreditException safe ? safe.Message : hostStopped ? "重置未能完成，请刷新次数和额度核对后再操作。" : "未能停止账号服务，本次未执行重置。请重新打开工具。";
         } finally {
@@ -331,11 +346,63 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
         }
     }
 
+    private Task RefreshAccountsAsync(Guid? accountId, bool quiet) {
+        lock (commandStateLock) {
+            if (stopping || cancellingLogin || busy || foregroundWaiting != 0 || core == null || !initialized || core.State.IsMutating || core.State.IsAddingAccount)
+                return Task.CompletedTask;
+            var tasks = State.Accounts.Where(row => accountId == null || row.Profile.Id == accountId).Select(row => {
+                var id = row.Profile.Id;
+                if (manualReads.TryGetValue(id, out var existing)) return existing;
+                var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                manualReads[id] = completion.Task;
+                var cancellation = CancellationTokenSource.CreateLinkedTokenSource(usageLifetime.Token);
+                manualReadCancellation[id] = cancellation;
+                _ = ReadManualAccountAsync(id, quiet, Volatile.Read(ref usageGeneration), completion, cancellation);
+                return completion.Task;
+            }).ToArray();
+            return Task.WhenAll(tasks);
+        }
+    }
+    private async Task ReadManualAccountAsync(Guid id, bool quiet, int generation, TaskCompletionSource completion, CancellationTokenSource cancellation) {
+        // Yield until the request is registered; no UI-wide command lock is held during network I/O.
+        await Task.Yield();
+        try {
+            var runtime = core;
+            if (runtime != null && generation == Volatile.Read(ref usageGeneration)) {
+                try {
+                    await usageReads.WaitAsync(cancellation.Token);
+                    try { await runtime.RefreshAccountCredentialAsync(id, cancellation.Token); }
+                    finally { usageReads.Release(); }
+                }
+                catch { /* The direct reader below reports the account-specific failure. */ }
+            }
+            await ReadRevisionAsync(id, Math.Max(1, core?.State.UsageRefreshRevision ?? 1), generation,
+                reconcileReset: true, quiet: quiet, cancellation: cancellation.Token);
+        } catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        catch (Exception ex) { completion.TrySetException(ex); }
+        finally {
+            lock (commandStateLock) { manualReads.Remove(id); manualReadCancellation.Remove(id); }
+            cancellation.Dispose();
+            completion.TrySetResult();
+            if (!usageLifetime.IsCancellationRequested) context.Post(_ => Notify(), null);
+        }
+    }
+    private async Task StopManualReadsAsync() {
+        Task[] reads;
+        lock (commandStateLock) {
+            reads = manualReads.Values.ToArray();
+            foreach (var cancellation in manualReadCancellation.Values) cancellation.Cancel();
+        }
+        await Task.WhenAll(reads);
+    }
     public async Task CommandAsync(string command, Guid? accountID = null, bool? value = null, string? language = null)
     {
         var intervalSetting = command == "quotaRefreshInterval";
         if (intervalSetting && (!int.TryParse(language, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var minutes) || minutes is < 0 or > 1440))
             throw new IOException("刷新间隔须为 1–1440 的整数分钟；禁用请选择禁用选项。");
+        if (directUsageEnabled && command is "refresh" or "refreshQuiet") {
+            await RefreshAccountsAsync(accountID, command == "refreshQuiet"); return;
+        }
         // Cancellation must reach the login even when its start acknowledgement
         // or another ordinary command is still waiting on the shared transport.
         if (command == "cancelAdd") { await CancelAddingAccountAsync(); return; }
@@ -345,19 +412,22 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
         }
         try {
             if (core == null) throw new IOException("Account core is unavailable. Restart the app.");
+            if (command is "switch" or "restart" or "remove" or "resetQuota" or "add" or "register") {
+                busy = true;
+                try { await StopManualReadsAsync(); }
+                finally { busy = false; }
+            }
             if (command == "remove" && !core.State.Accounts.Any(row => row.Profile.Id == accountID)) return;
             if (command == "add") Notify();
             if (command == "dismissError") error = null;
             if (command == "resetQuota") { if (accountID is { } resetId) await ResetQuotaAsync(resetId); return; }
-            if (command == "refresh" && directUsageEnabled) {
-                if (core.State.IsMutating || core.State.IsAddingAccount) return;
-                busy = true; error = null; Notify();
-                // The host acknowledges only after its refresh cycle finishes.
-                await core.CommandAsync("refresh", accountID);
-                var generation = AdvanceUsageGeneration();
-                var revision = Math.Max(1, core.State.UsageRefreshRevision);
-                var ids = State.Accounts.Where(row => accountID == null || row.Profile.Id == accountID).Select(row => row.Profile.Id).ToArray();
-                await Task.WhenAll(ids.Select(id => ReadRevisionAsync(id, revision, generation, reconcileReset: true)));
+            if (command == "restart") {
+                if (accountID == null || accountID != State.ActiveAccountID || core.State.IsMutating || core.State.IsAddingAccount) return;
+                if (QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(row => row.Profile.Id == accountID)?.UsageError))
+                    throw new IOException("该账号登录已失效，请先重新授权。");
+                busy = true; error = null; AdvanceUsageGeneration(); Notify();
+                await desktop.CloseAsync(usageLifetime.Token);
+                await desktop.OpenAsync(usageLifetime.Token);
                 return;
             }
             if (command != "switch") {
@@ -411,7 +481,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
             // another command cannot steal a gate released to this waiter.
             Volatile.Write(ref foregroundWaiting, 1);
             wait = commands.WaitAsync(usageLifetime.Token);
-            if (command is "remove" or "add" or "import") {
+            if (command is "remove" or "add" or "import" or "switch" or "restart" or "resetQuota") {
                 // Invalidate first: even a reader that completes during cancellation cannot publish stale data.
                 AdvanceUsageGeneration();
                 automaticUsageCancellation?.Cancel();
@@ -499,6 +569,8 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
         Task? automatic;
         lock (commandStateLock) { stopping = true; automatic = automaticUsageTask; }
         usageLifetime.Cancel(); if (automatic != null) await automatic;
+        Task[] reads; lock (commandStateLock) reads = manualReads.Values.ToArray();
+        await Task.WhenAll(reads);
         // A pending add can own commands until the host stops. Cancel it first;
         // taking that gate before stopping the login would deadlock shutdown.
         await CancelAddingAccountAsync();
@@ -516,6 +588,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
         public AccountSnapshot State => client.State;
         public event Action? Changed { add => client.Changed += value; remove => client.Changed -= value; }
         public Task InitializeAsync() => client.InitializeAsync();
+        public Task RefreshAccountCredentialAsync(Guid id, CancellationToken ct) => client.RefreshAccountCredentialAsync(id, ct);
         public Task CommandAsync(string command, Guid? accountID = null, bool? value = null, string? language = null) => client.CommandAsync(command, accountID, value, language);
         public ValueTask DisposeAsync() => client.DisposeAsync();
     }
@@ -524,4 +597,4 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
     }
 }
 
-internal interface IAccountRuntime : IAccountClient, IAsyncDisposable { Task InitializeAsync(); }
+internal interface IAccountRuntime : IAccountClient, IAsyncDisposable { Task InitializeAsync(); Task RefreshAccountCredentialAsync(Guid id, CancellationToken ct) => Task.CompletedTask; }

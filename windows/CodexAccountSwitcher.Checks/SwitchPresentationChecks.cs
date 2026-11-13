@@ -1,10 +1,11 @@
-using CodexAccountSwitcher.Core;
+﻿using CodexAccountSwitcher.Core;
 
 internal static class SwitchPresentationChecks
 {
     public static async Task RunAsync()
     {
         foreach (var fail in new[] { false, true }) await VerifyAsync(fail);
+        await RestartAsync();
         Console.WriteLine("PASS: switch presentation retains plan, verified expiry, quota and reset expiry during success/failure and delayed rereads; changed credentials invalidate only their own account.");
     }
     private static void Check(bool value, string message) { if (!value) throw new Exception(message); }
@@ -99,6 +100,37 @@ internal static class SwitchPresentationChecks
             if (Gate != null) await Gate.WaitAsync(ct);
             return new SubscriptionLookup(credential.AccountID, "pro", until, "subscriptions");
         }
+    }
+    private static async Task RestartAsync() {
+        var root = Path.Combine(Path.GetTempPath(), "switcher-restart-" + Guid.NewGuid());
+        var id = Guid.NewGuid(); var data = Path.Combine(root, "data"); var active = Path.Combine(root, "active");
+        var saved = Path.Combine(data, "accounts", id.ToString().ToUpperInvariant(), "auth.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(saved)!); Directory.CreateDirectory(active);
+        var bytes = GuardedChecks.Credential(id.ToString()).Bytes;
+        File.WriteAllBytes(saved, bytes); File.WriteAllBytes(Path.Combine(active, "auth.json"), bytes);
+        var runtime = new Runtime(AccountSnapshot.Empty with { ActiveAccountID = id, Accounts = [new(new(id, "Synthetic", "restart@example.test"), "R", null, null)] }, false);
+        var desktop = new RestartDesktop();
+        try {
+            await using var client = new GuardedAccountClient(data, active, () => runtime, new Credits(DateTimeOffset.UtcNow.AddDays(1)),
+                (_, _) => Task.FromResult(new Usage(70, DateTimeOffset.UtcNow.AddDays(2), null, null)), new Validator(), desktop: desktop);
+            await client.InitializeAsync(); await Until(() => client.State.Accounts[0].Usage != null);
+            var restart = client.CommandAsync("restart", id);
+            await desktop.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Check(client.State.IsMutating && desktop.Events.SequenceEqual(new[] { "close" }), "Restart must close before opening and expose mutation state.");
+            desktop.Continue.SetResult(); await restart;
+            Check(desktop.Events.SequenceEqual(new[] { "close", "open" }) && !client.State.IsMutating, "Restart opens the desktop exactly once after close.");
+            Check(client.State.ActiveAccountID == id && File.ReadAllBytes(saved).SequenceEqual(bytes) && File.ReadAllBytes(Path.Combine(active, "auth.json")).SequenceEqual(bytes), "Restart preserves both saved/live credentials and current account.");
+            await client.CommandAsync("restart", Guid.NewGuid());
+            Check(desktop.Events.Count == 2, "A stale/non-current restart target cannot restart another account.");
+        } finally { SecureFiles.DeleteOwnedDirectory(Path.GetTempPath(), root); }
+        Console.WriteLine("PASS: current-account restart confirmation backend, close/open ordering, stale target rejection and unchanged credentials.");
+    }
+    private sealed class RestartDesktop : IDesktopOperations {
+        public readonly List<string> Events = [];
+        public readonly TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource Continue = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task CloseAsync(CancellationToken ct) { Events.Add("close"); Started.SetResult(); await Continue.Task.WaitAsync(ct); }
+        public Task OpenAsync(CancellationToken ct) { Events.Add("open"); return Task.CompletedTask; }
     }
     private sealed class Validator : ILoginValidator
     {

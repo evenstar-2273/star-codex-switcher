@@ -105,6 +105,15 @@ jobs:
         run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- quota-network
           if ($LASTEXITCODE -ne 0) { throw 'Quota network error checks failed.' }
+      - name: Check independent refresh coordination and desktop shutdown
+        shell: pwsh
+        run: |
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- command-coordination
+          if ($LASTEXITCODE -ne 0) { throw 'Command coordination checks failed.' }
+          dotnet build windows/CodexAccountSwitcher.CloseFixture -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop fixture build failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- desktop-close ./windows/CodexAccountSwitcher.CloseFixture/bin/Release/net10.0-windows/ChatGPT.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop shutdown checks failed.' }
       - name: Check WPF with synthetic accounts
         shell: pwsh
         run: |

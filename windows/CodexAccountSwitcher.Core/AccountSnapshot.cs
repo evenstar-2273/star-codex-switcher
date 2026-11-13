@@ -7,7 +7,7 @@ public sealed record Profile(Guid Id, string DisplayName, string? Email);
 public sealed record QuotaWindow(long Seconds, int RemainingPercent, DateTimeOffset? ResetsAt);
 public sealed record Usage(int? RemainingPercent, DateTimeOffset? ResetsAt,
     int? FiveHourRemainingPercent, DateTimeOffset? FiveHourResetsAt, int? ResetCreditsRemaining = null,
-    DateTimeOffset? ResetCreditsExpireAt = null, string? PlanType = null, QuotaWindow[]? Windows = null)
+    DateTimeOffset? ResetCreditsExpireAt = null, string? PlanType = null, QuotaWindow[]? Windows = null, BankedCredit[]? ResetCards = null)
 {
     public IEnumerable<QuotaWindow> DisplayWindows()
     {

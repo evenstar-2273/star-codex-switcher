@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -46,7 +46,14 @@ internal static class RefreshResetChecks
                 freeLabels.Any(label => label.Contains("剩余 5 小时")) && !freeLabels.Contains("7 天剩余"),
                 "The free account displays its monthly allowance independently of its five-hour subscription countdown.");
             Capture(window, Path.Combine(output, "free-monthly-allowance.png"));
+            client.Publish(client.State with { Accounts = [client.State.Accounts[0] with { Subscription = null }] });
+            Pump(40);
+            freeLabels = All<TextBlock>(Cards(window).Single()).Select(label => label.Text).ToArray();
+            Check(freeLabels.Contains("免费账号，无付费订阅") && !freeLabels.Any(label => label.Contains("剩余 5 小时")),
+                "Confirmed Free with no paid entitlement has no old paid subscription countdown.");
+            Capture(window, Path.Combine(output, "free-no-paid-expiry.png"));
             client.Publish(beforeFree); Pump(40);
+            ResetListPresentation(window, client, native, output);
             ColorPresentation(app, window, native, output);
             CountdownPresentation(window, () => displayNow = displayNow.AddMinutes(1), output);
             RefreshInteractions(window, client, output);
@@ -159,7 +166,7 @@ internal static class RefreshResetChecks
         Check(ReferenceEquals(scroll, window.PageScrollViewer) && Math.Abs(scroll.VerticalOffset - listOffset) < 1, "Starting and redrawing a global refresh preserves the account list scroll position.");
         scroll.ScrollToTop(); Pump(40); Capture(window, Path.Combine(output, "refresh-global-pending.png"));
         scroll.ScrollToVerticalOffset(listOffset); Pump(40);
-        client.Release(); PumpUntil(() => !window.IsBusy); Pump(30);
+        client.Release(); PumpUntil(() => !window.IsBusy && !window.IsRefreshing); Pump(30);
         Check(!rotation.HasAnimatedProperties && RefreshButtons(window).All(button => !Icon(button).RenderTransform.HasAnimatedProperties && button.IsEnabled), "Successful completion removes the animation clocks and restores the refresh controls.");
         Check(Math.Abs(scroll.VerticalOffset - listOffset) < 1, "Successful completion retains the account list position.");
 
@@ -169,11 +176,14 @@ internal static class RefreshResetChecks
         var single = ActiveRotation(Button(Cards(window)[1], "刷新此账号"));
         Check(!Icon(Button(window, "刷新")).RenderTransform.HasAnimatedProperties && Cards(window).Where((_, i) => i != 1).All(card => !Icon(Button(card, "刷新此账号")).RenderTransform.HasAnimatedProperties), "A single-account refresh leaves the header and unrelated account icons stationary.");
         AssertTurns(single);
-        Click(Button(window, "刷新")); Click(Button(Cards(window)[2], "刷新此账号"));
-        Check(client.Calls.Count == 2, "Global and other-card clicks cannot overlap a pending single-account refresh.");
+        Check(!window.IsBusy && Button(window, "设置").IsEnabled && Button(Cards(window)[2], "删除").IsEnabled, "Single refresh does not disable settings or other card actions.");
+        Check(Button(window, "刷新").IsEnabled, "Global refresh stays available during a single-account read.");
+        Click(Button(Cards(window)[2], "刷新此账号")); Pump(30);
+        Check(client.Calls.Count == 3 && client.Calls[2] == client.State.Accounts[2].Profile.Id, "Other accounts refresh independently without a page-wide lock.");
+        Check(!Button(Cards(window)[1], "刷新此账号").IsEnabled && !Button(Cards(window)[2], "刷新此账号").IsEnabled && Button(Cards(window)[0], "刷新此账号").IsEnabled, "Only each refreshing account disables its own refresh button.");
         scroll.ScrollToTop(); Pump(30); Capture(window, Path.Combine(output, "refresh-single-pending.png"));
         scroll.ScrollToVerticalOffset(listOffset); Pump(30);
-        client.Release(new IOException("模拟刷新失败，保留已有数据。")); PumpUntil(() => !window.IsBusy); Pump(40);
+        client.Release(new IOException("模拟刷新失败，保留已有数据。")); PumpUntil(() => !window.IsBusy && !window.IsRefreshing); Pump(40);
         Check(!single.HasAnimatedProperties && RefreshButtons(window).All(button => !Icon(button).RenderTransform.HasAnimatedProperties && button.IsEnabled), "A failed request also stops spinning and re-enables every refresh entry point.");
         Check(All<TextBlock>(window).Any(text => text.Text.Contains("模拟刷新失败")), "A failed refresh remains visible as an error rather than looking like a successful refresh.");
         Check(Math.Abs(scroll.VerticalOffset - listOffset) < 1, "An error render preserves list scroll position.");
@@ -185,12 +195,12 @@ internal static class RefreshResetChecks
         Check(All<TextBlock>(window).Any(text => text.IsVisible && text.Text.Contains("启动时检查一次") && text.Text.Contains("每 60 分钟") && text.Text.Contains("本次运行仅自动提醒一次")), "Update settings explain the startup, hourly and once-per-run automatic reminder policy.");
         client.Notify(); Pump(30);
         Check(ReferenceEquals(scroll.Content, settingsBody) && Math.Abs(scroll.VerticalOffset - settingsOffset) < 1, "An account notification during refresh does not rebuild or move settings content.");
-        client.Release(); PumpUntil(() => !window.IsBusy); Pump(40);
+        client.Release(); PumpUntil(() => !window.IsBusy && !window.IsRefreshing); Pump(40);
         Check(!settingsRotation.HasAnimatedProperties && ReferenceEquals(scroll, window.PageScrollViewer) && Math.Abs(scroll.VerticalOffset - settingsOffset) < 1, "Refresh completion stops hidden animation and preserves the settings scroll offset.");
         window.Navigate("accounts"); Pump(30);
         Check(RefreshButtons(window).All(button => button.IsEnabled && !Icon(button).RenderTransform.HasAnimatedProperties), "Returning to the list after completion cannot revive a stale refresh animation.");
-        Click(Button(Cards(window)[0], "刷新此账号")); Pump(20); client.Release(); PumpUntil(() => !window.IsBusy);
-        Check(client.Calls.Count == 4, "Refresh can be retried normally after an earlier failure.");
+        Click(Button(Cards(window)[0], "刷新此账号")); Pump(20); client.Release(); PumpUntil(() => !window.IsBusy && !window.IsRefreshing);
+        Check(client.Calls.Count == 5, "Refresh can be retried normally after an earlier failure.");
     }
     private static FrameworkElement ResetLine(DependencyObject owner) => All<FrameworkElement>(owner).Single(element => Name(element) == "重置卡到期");
     private static void SilentAndAccountActions(App app, MainWindow window, Client client, NativeSettings native, string output)
@@ -200,6 +210,22 @@ internal static class RefreshResetChecks
         client.Publish(client.State with { UsageRefreshRevision = client.State.UsageRefreshRevision + 1 }); Pump(30);
         Check(ReferenceEquals(before, window.PageScrollViewer.Content) && !window.IsBusy && RefreshButtons(window).All(button => !Icon(button).RenderTransform.HasAnimatedProperties && button.IsEnabled),
             "A timer revision with unchanged visible data neither rebuilds the list nor spins or disables controls.");
+        window.OpenWindow(); Pump(30);
+        Check(!window.IsBusy && !window.IsRefreshing && Button(window, "设置").IsEnabled && RefreshButtons(window).All(button => button.IsEnabled), "Opening starts a silent read without disabled controls or rotation.");
+        client.Release(); Pump(40);
+        var current = Cards(window)[0];
+        var restart = All<Button>(current).Single(button => Name(button) == client.State.Accounts[0].Profile.Email);
+        Check(restart.IsEnabled && All<TextBlock>(restart).Any(text => text.Text == "重启"), "Current account exposes an enabled restart action.");
+        var beforeRestart = client.OtherCalls; Click(restart); Pump(25);
+        Check(window.CurrentPage == "restart" && client.OtherCalls == beforeRestart && All<TextBlock>(window).Any(text => text.Text.Contains("正在运行的任务会中断")), "Restart requires confirmation and explains interrupted tasks.");
+        Click(Button(window, "取消")); Pump(20);
+        Check(client.OtherCalls == beforeRestart, "Cancelling restart sends no command.");
+        Click(Button(Cards(window)[1], "刷新此账号")); Pump(25);
+        var requestsBeforeAll = client.Calls.Count;
+        Click(Button(window, "刷新")); Pump(25);
+        Check(client.Calls.Count == requestsBeforeAll + 1 && client.Calls[^1] == null && !window.IsBusy && Button(window, "设置").IsEnabled,
+            "Global refresh can join an individual read without blocking other actions.");
+        client.Release(); PumpUntil(() => !window.IsRefreshing); Pump(30);
         var active = client.State.ActiveAccountID;
         var remove = Button(Cards(window)[0], "删除"); Check(remove.IsEnabled, "The current account exposes an enabled delete action.");
         Click(remove); Pump(30);
@@ -270,6 +296,35 @@ internal static class RefreshResetChecks
                 "A successful refreshed state removes the expiration alert and restores switching.");
         }
     }
+    private static void ResetListPresentation(MainWindow window, Client client, NativeSettings native, string output)
+    {
+        var saved = client.State; var width = window.Width; var height = window.Height;
+        var records = new BankedCredit[] {
+            new("later", "available", "codexRateLimits", Now.AddDays(8), Now.AddDays(-2)),
+            new("urgent", "available", "codexRateLimits", Now.AddHours(8), Now.AddDays(-5)),
+            new("soon", "available", "codexRateLimits", Now.AddDays(2), null)
+        };
+        var fixture = saved with { Accounts = [saved.Accounts[0] with { Usage = saved.Accounts[0].Usage! with { ResetCards = records, ResetCreditsRemaining = 3, ResetCreditsExpireAt = Now.AddHours(8) } }] };
+        foreach (var dark in new[] { false, true }) {
+            native.ThemePreference = dark ? "dark" : "light";
+            client.Publish(fixture); window.Navigate("accounts"); window.Width = 1100; window.Height = 1000; Pump(30);
+            Click(Button(Cards(window)[0], "重置额度")); Pump(40);
+            var rows = All<Grid>(window).Where(row => Name(row) == "重置卡明细行").ToArray();
+            Check(rows.Length == 3 && All<TextBlock>(rows[0]).Any(text => text.Text == "（剩余 8 小时 0 分钟）") &&
+                All<TextBlock>(rows[1]).Any(text => text.Text == "未提供"), "Reset list sorts earliest expiry first and does not invent missing grant times.");
+            Check(rows.All(row => All<TextBlock>(row).Any(text => text.Text == "可用")) && client.ResetCalls.Count == 0,
+                "Opening credit details only displays available cards without consuming them.");
+            Capture(window, Path.Combine(output, $"reset-list-{(dark ? "dark" : "light")}.png"));
+            window.Width = 480; Pump(40);
+            rows = All<Grid>(window).Where(row => Name(row) == "重置卡明细行").ToArray();
+            Check(rows.All(row => row.ColumnDefinitions[2].ActualWidth == 0 && row.Children.OfType<StackPanel>().Any(panel => Grid.GetRow(panel) == 1)),
+                "Narrow credit rows stack the dates instead of clipping the countdown.");
+            Capture(window, Path.Combine(output, $"reset-list-narrow-{(dark ? "dark" : "light")}.png"));
+        }
+        client.Publish(fixture with { Accounts = [fixture.Accounts[0] with { Usage = fixture.Accounts[0].Usage! with { ResetCards = null } }] }); Pump(30);
+        Check(All<TextBlock>(window).Any(text => text.Text.Contains("暂未获取到重置卡明细")), "A missing detail response is shown honestly instead of creating synthetic cards.");
+        client.Publish(saved); window.Width = width; window.Height = height; window.Navigate("accounts"); Pump(30);
+    }
     private static void LocalAccountDialog(MainWindow owner, string output)
     {
         var calls = 0;
@@ -308,7 +363,7 @@ internal static class RefreshResetChecks
                 "Reset confirmation, cancellation and navigation are disabled while the request is pending.");
             AssertTurns(rotation);
             Click(confirm); Click(confirm); Click(oldCard); Click(oldRefresh);
-            Check(client.ResetCalls.Count == calls + 1 && client.Calls.Count == 4,
+            Check(client.ResetCalls.Count == calls + 1 && client.Calls.Count == 5,
                 "Repeated or stale reset and refresh callbacks cannot submit another request during reset.");
             client.Notify(); Pump(40);
             Check(ReferenceEquals(ActiveRotation(Button(window, "重置中…")), rotation), "Host redraw retains the reset animation phase.");
@@ -326,7 +381,7 @@ internal static class RefreshResetChecks
                     "If the account list becomes visible, only the target reset button spins; refresh and unrelated reset controls stay stationary.");
                 Capture(window, Path.Combine(output, "reset-card-pending-dark.png"));
             }
-            client.ReleaseReset(); PumpUntil(() => !window.IsBusy); Pump(40);
+            client.ReleaseReset(); PumpUntil(() => !window.IsBusy && !window.IsRefreshing); Pump(40);
             Check(window.CurrentPage == "accounts" && !rotation.HasAnimatedProperties && client.State.ActiveAccountID == activeId &&
                 Cards(window).All(card => !Icon(Button(card, "重置额度")).RenderTransform.HasAnimatedProperties),
                 "Completed reset readback stops every reset animation and returns to the account list without switching login.");
@@ -340,7 +395,7 @@ internal static class RefreshResetChecks
         Click(Button(window, confirmName)); Pump(30); var failedRotation = ActiveRotation(Button(window, "重置中…"));
         client.Notify(); Pump(30);
         Check(Math.Abs(window.PageScrollViewer.VerticalOffset - offset) < 1, "Pending reset snapshot redraw preserves confirmation scroll position.");
-        client.ReleaseReset(new IOException("模拟重置连接失败，请先核对结果。")); PumpUntil(() => !window.IsBusy); Pump(40);
+        client.ReleaseReset(new IOException("模拟重置连接失败，请先核对结果。")); PumpUntil(() => !window.IsBusy && !window.IsRefreshing); Pump(40);
         Check(window.CurrentPage == "resetQuota" && !failedRotation.HasAnimatedProperties &&
             All<TextBlock>(window).Any(text => text.Text.Contains("模拟重置连接失败")),
             "A thrown reset error stops the animation and leaves the exact failure visible on confirmation.");
@@ -356,7 +411,7 @@ internal static class RefreshResetChecks
             var stateErrorRotation = ActiveRotation(Button(window, "重置中…"));
             client.CompleteResetMutation();
             client.ReleaseReset(stateError: "重置请求已成功，但最新额度或次数尚未完整读取，请刷新后核对。");
-            PumpUntil(() => !window.IsBusy); Pump(40);
+            PumpUntil(() => !window.IsBusy && !window.IsRefreshing); Pump(40);
             Check(window.CurrentPage == "resetQuota" && !stateErrorRotation.HasAnimatedProperties &&
                 All<TextBlock>(window).Any(text => text.Text.Contains("尚未完整读取")) && !Button(window, confirmName).IsEnabled && Button(window, "返回").IsEnabled,
                 "A normally completed task with a backend error remains visible, ends loading and preserves the unknown-credit guard.");
@@ -414,7 +469,7 @@ internal static class RefreshResetChecks
         public readonly List<Guid?> Calls = [];
         public readonly List<Guid?> AddCalls = [];
         public int RemovalCalls, OtherCalls;
-        private TaskCompletionSource? pending;
+        private readonly List<TaskCompletionSource> pending = [];
         private TaskCompletionSource? resetPending;
         public readonly List<Guid?> ResetCalls = [];
         public AccountSnapshot State { get; private set; }
@@ -440,14 +495,13 @@ internal static class RefreshResetChecks
                 State = State with { Error = null };
                 resetPending = new(TaskCreationOptions.RunContinuationsAsynchronously); return resetPending.Task;
             }
-            if (command != "refresh") { OtherCalls++; return Task.CompletedTask; }
+            if (command is not ("refresh" or "refreshQuiet")) { OtherCalls++; return Task.CompletedTask; }
             Calls.Add(accountID);
-            if (pending != null) throw new Exception("The UI submitted an overlapping synthetic refresh.");
-            pending = new(TaskCreationOptions.RunContinuationsAsynchronously); return pending.Task;
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); pending.Add(completion); return completion.Task;
         }
         public void Notify() => Changed?.Invoke();
         public void Publish(AccountSnapshot state) { State = state; Notify(); }
-        public void Release(Exception? error = null) { var completion = pending; pending = null; if (error == null) completion?.TrySetResult(); else completion?.TrySetException(error); }
+        public void Release(Exception? error = null) { var requests = pending.ToArray(); pending.Clear(); foreach (var completion in requests) { if (error == null) completion.TrySetResult(); else completion.TrySetException(error); } }
         public void PrepareReset() {
             State = State with { Error = null, Accounts = State.Accounts.Select((row, index) => index == 2 ? row with { Usage = row.Usage! with { ResetCreditsRemaining = 2 } } : row).ToArray() };
             Notify();

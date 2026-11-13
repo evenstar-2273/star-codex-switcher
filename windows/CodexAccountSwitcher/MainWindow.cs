@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Globalization;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -35,10 +36,13 @@ public sealed class MainWindow : Window
     private int renderedLayout;
     private AdaptiveCardGrid? accountGrid;
     private RefreshRotation? refreshRotation;
+    private readonly System.Collections.Generic.Dictionary<Guid, RefreshRotation> accountRefreshes = new();
+    private bool quietRefreshPending;
+    public bool IsRefreshing => refreshRotation != null || accountRefreshes.Count != 0;
     private RefreshRotation? resetRotation;
     private QuotaRefreshSelector? quotaRefreshSelector;
     private bool layoutPending, closingForExit;
-    public bool IsBusy => refreshRotation != null || resetRotation != null || client.State.IsMutating || native.IsInstalling;
+    public bool IsBusy => resetRotation != null || client.State.IsMutating || native.IsInstalling;
     public string CurrentPage => page;
     public ScrollViewer PageScrollViewer => scroll;
     private double LayoutWidth => ActualWidth > 0 ? ActualWidth : Width;
@@ -52,6 +56,7 @@ public sealed class MainWindow : Window
         if (Chinese && key == "auto_reset_hint") return "重置卡到期前 10 分钟，自动使用所有已保存账号的可用重置卡；应用须运行且电脑保持唤醒。";
         return key switch {
             "accounts" => L("账号", "Accounts"), "settings" => L("设置", "Settings"), "back" => L("返回", "Back"),
+            "restart" => L("重启 Codex", "Restart Codex"),
             "cancel" => L("取消", "Cancel"), "remove" => L("删除", "Delete"), "switch" => L("切换账号", "Switch account"),
             "add_account" => L("添加账号", "Add account"), "cancel_add_account" => L("取消添加", "Cancel sign-in"),
             "register_current_account" => L("获取本地账号", "Get local account"),
@@ -102,6 +107,7 @@ public sealed class MainWindow : Window
         Closed += (_, _) => {
             presentationTimer.Stop(); client.Changed -= OnClientChanged; this.native.Changed -= Render;
             refreshRotation?.Dispose();
+            foreach (var rotation in accountRefreshes.Values) rotation.Dispose();
             resetRotation?.Dispose();
         };
         Render();
@@ -110,7 +116,14 @@ public sealed class MainWindow : Window
     public void OpenWindow() {
         if (State.IsAddingAccount) Navigate("accounts");
         Show(); if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
-        Activate(); _ = Run("refresh");
+        Activate(); _ = RefreshOnOpenAsync();
+    }
+    private async Task RefreshOnOpenAsync() {
+        if (quietRefreshPending || IsBusy || State.IsAddingAccount || closingForExit) return;
+        quietRefreshPending = true;
+        try { await client.CommandAsync("refreshQuiet"); }
+        catch { /* Opening the window never raises a foreground query error. */ }
+        finally { quietRefreshPending = false; }
     }
     public void Navigate(string destination) { page = destination == "manage" ? "accounts" : destination; target = null; localError = null; Render(); }
     private async Task Run(string command, Guid? id = null, bool? value = null, string? language = null) {
@@ -136,17 +149,20 @@ public sealed class MainWindow : Window
             return;
         }
         if (command == "refresh") {
-            if (IsBusy || State.IsAddingAccount || closingForExit) return;
+            if (IsBusy || State.IsAddingAccount || closingForExit || refreshRotation != null ||
+                (id is { } refreshingId && accountRefreshes.ContainsKey(refreshingId))) return;
             // Keep one animation clock for the entire awaited request. Re-rendered icons
             // use the same transform, so progress notifications do not restart the spin.
             var rotation = new RefreshRotation(id);
-            refreshRotation = rotation; localError = null;
+            if (id is { } startId) accountRefreshes[startId] = rotation; else refreshRotation = rotation;
+            localError = null;
             Render();
             try { await client.CommandAsync(command, id, value, language); }
             catch (Exception ex) { localError = ex.Message; }
             finally {
                 rotation.Dispose();
-                if (ReferenceEquals(refreshRotation, rotation)) refreshRotation = null;
+                if (id is { } endId) accountRefreshes.Remove(endId);
+                else if (ReferenceEquals(refreshRotation, rotation)) refreshRotation = null;
                 Render();
             }
             return;
@@ -180,7 +196,9 @@ public sealed class MainWindow : Window
         button.IsEnabled &= !State.IsAddingAccount;
         var icon = ((StackPanel)button.Content).Children.OfType<TextBlock>().First();
         icon.RenderTransformOrigin = new Point(.5, .5);
-        icon.RenderTransform = refreshRotation?.Includes(accountId) == true ? refreshRotation.Transform : new RotateTransform();
+        var rotation = refreshRotation ?? (accountId is { } id ? accountRefreshes.GetValueOrDefault(id) : null);
+        button.IsEnabled &= rotation == null;
+        icon.RenderTransform = rotation != null ? rotation.Transform : new RotateTransform();
         return button;
     }
     private Border Rule() { var rule = new Border { Height = 1 }; rule.SetResourceReference(Border.BackgroundProperty, "Line"); return rule; }
@@ -194,7 +212,7 @@ public sealed class MainWindow : Window
     }
     private void StartConfirmation(AccountRow row, string destination) {
         if (IsBusy || State.IsAddingAccount) return;
-        if (destination == "switch" && QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(account => account.Profile.Id == row.Profile.Id)?.UsageError)) return;
+        if ((destination is "switch" or "restart") && QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(account => account.Profile.Id == row.Profile.Id)?.UsageError)) return;
         confirmationReturnPage = "accounts"; target = row; page = destination; Render();
     }
     private void OnClientChanged()
@@ -269,7 +287,7 @@ public sealed class MainWindow : Window
             Accounts(body);
         } else {
             var back = Button("", () => Navigate(page is "remove" or "resetQuota" ? confirmationReturnPage : "accounts"), "\uE72B"); AutomationProperties.SetName(back, T("back"));
-            var heading = Text(page switch { "settings" => T("settings"), "resetQuota" => L("重置账号额度", "Reset account quota"), "remove" => L("删除账号", "Delete account"), _ => L("切换账号", "Switch account") }, 26, bold: true);
+            var heading = Text(page switch { "settings" => T("settings"), "restart" => L("重启 Codex", "Restart Codex"), "resetQuota" => L("重置账号额度", "Reset account quota"), "remove" => L("删除账号", "Delete account"), _ => L("切换账号", "Switch account") }, 26, bold: true);
             heading.Margin = new Thickness(14, 0, 0, 0);
             var header = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 26, 0, 24) }; header.Children.Add(back); header.Children.Add(heading); body.Children.Add(header);
             if (page == "settings") Settings(body); else Confirmation(body);
@@ -449,7 +467,7 @@ public sealed class MainWindow : Window
                 remaining.SetResourceReference(TextBlock.ForegroundProperty, needsVerification ? "Muted" : AccountVisuals.ExpiryTone(subscription.ActiveUntil, currentTime)); expiry.Children.Add(remaining);
             }
         } else {
-            var missing = Text(row.SubscriptionStatus switch {
+            var missing = Text(row.SubscriptionStatus == "verified" && row.PlanType == "free" ? L("免费账号，无付费订阅", "Free account, no paid subscription") : row.SubscriptionStatus switch {
                 "checking" => L("有效期：核验中…", "Expiry: checking…"),
                 "stale" or "unavailable" => L("有效期：待核验", "Expiry: verification needed"),
                 _ => L("有效期：未知", "Expiry: unknown")
@@ -463,11 +481,11 @@ public sealed class MainWindow : Window
         var accountActions = new StackPanel { Orientation = Orientation.Horizontal };
         var utilityActions = new StackPanel { Orientation = Orientation.Horizontal };
         actions.Children.Add(accountActions); actions.Children.Add(utilityActions);
-        var change = Button(active ? L("使用中", "In use") : L("切换", "Switch"), () => { if (!active) StartConfirmation(row, "switch"); }, active ? "\uE73E" : "\uE8AB");
+        var change = Button(active ? L("重启", "Restart") : L("切换", "Switch"), () => StartConfirmation(row, active ? "restart" : "switch"), active ? "\uE777" : "\uE8AB");
         var authenticationFailed = QuotaReadException.IsAuthenticationFailure(row.UsageError);
-        change.MinWidth = 86; change.IsEnabled &= !active && !State.IsAddingAccount && !authenticationFailed; if (!active) Primary(change);
+        change.MinWidth = 86; change.IsEnabled &= !State.IsAddingAccount && !authenticationFailed; if (!active) Primary(change);
         AutomationProperties.SetName(change, row.Profile.Email ?? row.Profile.DisplayName);
-        change.ToolTip = active ? L("当前使用的账号", "Current account") : authenticationFailed ? L("登录已失效，请先重新授权后再切换", "Sign-in expired; authorize again before switching") : L("确认后切换此账号", "Confirm before switching to this account"); accountActions.Children.Add(change);
+        change.ToolTip = active ? L("确认后以当前账号重启 Codex", "Confirm to restart Codex with the current account") : authenticationFailed ? L("登录已失效，请先重新授权后再切换", "Sign-in expired; authorize again before switching") : L("确认后切换此账号", "Confirm before switching to this account"); accountActions.Children.Add(change);
         var count = row.Usage?.ResetCreditsRemaining?.ToString(CultureInfo.CurrentCulture) ?? T("unknown");
         var resetting = resetRotation?.Includes(row.Profile.Id) == true;
         var reset = Button(resetting ? L("重置中…", "Resetting…") : L("重置 " + count + " 次", "Reset " + count), () => { if (row.Usage?.ResetCreditsRemaining > 0) StartConfirmation(row, "resetQuota"); }, "\uE777");
@@ -568,10 +586,12 @@ public sealed class MainWindow : Window
             var credits = Text(L("可用重置次数：", "Available reset credits: ") + (usage.ResetCreditsRemaining?.ToString(CultureInfo.CurrentCulture) ?? T("unknown")), 16, bold: true);
             credits.Margin = new Thickness(0, 16, 0, 0); content.Children.Add(credits);
             var expiry = ResetCreditExpiryLine(usage); expiry.Margin = new Thickness(0, 10, 0, 0); content.Children.Add(expiry);
+            content.Children.Add(ResetCardList(usage));
             var renewal = Text(L("额度自动恢复：", "Automatic quota renewal: ") + ResetSchedule(usage), 14, muted: true); renewal.TextWrapping = TextWrapping.Wrap;
             renewal.Margin = new Thickness(0, 8, 0, 0); content.Children.Add(renewal);
         }
         var copy = page switch {
+            "restart" => L("将关闭并重新打开 Codex，保留当前登录。正在运行的任务会中断，请先保存工作。", "Codex will close and reopen with its current login. Running tasks will be interrupted; save your work first."),
             "switch" => L("先联网验证目标账号；凭据失效或网络异常时保留当前登录。验证通过后，将强制结束并重新打开 Codex。未保存的状态可能丢失，请先完成当前任务。", "The target login is checked before Codex closes. Invalid credentials or network errors preserve the current login. Codex then closes forcibly and restarts. Finish active tasks first; unsaved work may be lost."),
             "resetQuota" => L("本次操作将消耗 1 张重置卡。", "This uses one reset credit."),
             _ => L("仅从此工具删除保存的账号，不会退出 Codex 当前登录，也不会删除 ChatGPT 账号。以后可重新授权、导入或获取本地账号。此操作无法撤销。", "Remove only the saved login from this tool. Codex stays signed in and your ChatGPT account is not deleted. You can authorize, import, or get the local account again. This cannot be undone.")
@@ -589,16 +609,72 @@ public sealed class MainWindow : Window
         var resetting = page == "resetQuota" && resetRotation?.Includes(id) == true;
         var confirm = Button(page == "resetQuota" ? resetting ? L("重置中…", "Resetting…") : L("确认重置", "Confirm reset") : T(command), () => {
             if (IsBusy || State.IsAddingAccount || command == "resetQuota" && State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage?.ResetCreditsRemaining is not > 0 ||
-                command == "switch" && QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.UsageError)) return;
+                (command is "switch" or "restart") && QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.UsageError)) return;
             if (command == "resetQuota") _ = Run(command, id);
             else { Navigate(confirmationReturnPage); _ = Run(command, id); }
         }, resetting ? "\uE777" : null);
         if (resetting) AttachResetRotation(confirm);
         confirm.IsEnabled &= !State.IsAddingAccount && (page != "resetQuota" || target.Usage?.ResetCreditsRemaining > 0) &&
-            (page != "switch" || !QuotaReadException.IsAuthenticationFailure(target.UsageError));
+            (page is not ("switch" or "restart") || !QuotaReadException.IsAuthenticationFailure(target.UsageError));
         if (page == "resetQuota") AutomationProperties.SetName(confirm, resetting ? L("重置中…", "Resetting…") : L("确认重置 · 消耗 1 张", "Confirm reset · use one credit"));
         confirm.Margin = new Thickness(10, 0, 0, 0); Primary(confirm); buttons.Children.Add(confirm); content.Children.Add(buttons);
         var box = Box(content); box.MaxWidth = 720; box.HorizontalAlignment = HorizontalAlignment.Stretch; body.Children.Add(box);
+    }
+    private FrameworkElement ResetCardList(Usage usage) {
+        var list = new StackPanel { Margin = new Thickness(14, 12, 14, 12) };
+        AutomationProperties.SetName(list, L("重置卡明细", "Reset credit details"));
+        var heading = Text(L("可用重置卡明细", "Available reset credits"), 14, bold: true);
+        heading.Margin = new Thickness(0, 0, 0, 8); list.Children.Add(heading);
+        var cards = usage.ResetCards?.Where(card => card.ResetType == "codexRateLimits" && card.Status == "available")
+            .OrderBy(card => card.ExpiresAt ?? DateTimeOffset.MaxValue).ThenBy(card => card.GrantedAt).ToArray();
+        if (cards is not { Length: > 0 } || usage.ResetCreditsRemaining is null or 0) {
+            var empty = Text(usage.ResetCreditsRemaining == 0 ? L("暂无可用重置卡。", "No reset credits available.")
+                : L("暂未获取到重置卡明细，请刷新后查看。", "Credit details are unavailable; refresh to check."), 14, muted: true);
+            empty.TextWrapping = TextWrapping.Wrap; list.Children.Add(empty);
+        } else {
+            for (var i = 0; i < cards.Length; i++) {
+                if (i > 0) list.Children.Add(Rule());
+                var card = cards[i]; var expired = card.ExpiresAt <= now();
+                var row = new Grid { Margin = new Thickness(0, 10, 0, 10) };
+                AutomationProperties.SetName(row, L("重置卡明细行", "Reset credit row"));
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(76) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.35, GridUnitType.Star) });
+                row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                var badgeText = Text(expired ? L("待刷新", "Recheck") : L("可用", "Available"), 13, bold: true);
+                badgeText.SetResourceReference(TextBlock.ForegroundProperty, expired ? "Warning" : "Success");
+                var badge = Box(badgeText, "InputSurface", 14); badge.Padding = new Thickness(10, 5, 10, 5);
+                badge.HorizontalAlignment = HorizontalAlignment.Left; badge.VerticalAlignment = VerticalAlignment.Top;
+                Grid.SetRowSpan(badge, 2); row.Children.Add(badge);
+                string Date(DateTimeOffset? date) => date?.ToLocalTime().ToString("MM-dd HH:mm") ?? L("未提供", "Not provided");
+                var issued = new StackPanel { Margin = new Thickness(0, 0, 12, 0) };
+                issued.Children.Add(Text(L("发放时间", "Granted"), 12, muted: true));
+                var issuedDate = Text(Date(card.GrantedAt), 14, bold: true); issuedDate.Margin = new Thickness(0, 4, 0, 0);
+                issuedDate.TextWrapping = TextWrapping.Wrap; issued.Children.Add(issuedDate); Grid.SetColumn(issued, 1); row.Children.Add(issued);
+                var expiry = new StackPanel(); expiry.Children.Add(Text(L("到期时间", "Expires"), 12, muted: true));
+                var expiryDate = Text(Date(card.ExpiresAt), 14, bold: true); expiryDate.Margin = new Thickness(0, 4, 0, 0);
+                expiryDate.SetResourceReference(TextBlock.ForegroundProperty, AccountVisuals.ResetExpiryTone(card.ExpiresAt, now()));
+                expiryDate.TextWrapping = TextWrapping.Wrap; expiry.Children.Add(expiryDate);
+                var countdown = Text(expired ? L("（已到期，待刷新）", "(Expired; refresh to check)")
+                    : L("（", "(") + AccountVisuals.QuotaCountdown(card.ExpiresAt, now(), Chinese) + L("）", ")"), 13, bold: true);
+                countdown.SetResourceReference(TextBlock.ForegroundProperty, AccountVisuals.ResetExpiryTone(card.ExpiresAt, now()));
+                countdown.TextWrapping = TextWrapping.Wrap; countdown.Margin = new Thickness(0, 3, 0, 0); expiry.Children.Add(countdown);
+                Grid.SetColumn(expiry, 2); row.Children.Add(expiry);
+                row.SizeChanged += (_, _) => {
+                    var narrow = row.ActualWidth < 460;
+                    row.ColumnDefinitions[2].Width = narrow ? new GridLength(0) : new GridLength(1.35, GridUnitType.Star);
+                    Grid.SetColumn(expiry, narrow ? 1 : 2); Grid.SetRow(expiry, narrow ? 1 : 0);
+                    expiry.Margin = new Thickness(0, narrow ? 10 : 0, 0, 0);
+                };
+                list.Children.Add(row);
+            }
+            if (usage.ResetCreditsRemaining > cards.Length) {
+                var partial = Text(L("部分重置卡暂无明细，以可用次数为准。", "Some credit details are unavailable; refer to the available count."), 12, muted: true);
+                partial.TextWrapping = TextWrapping.Wrap; list.Children.Add(partial);
+            }
+        }
+        var panel = Box(list, "InputSurface", 12); panel.Margin = new Thickness(0, 14, 0, 4); return panel;
     }
     private void AttachResetRotation(Button button) {
         var icon = ((StackPanel)button.Content).Children.OfType<TextBlock>().First();

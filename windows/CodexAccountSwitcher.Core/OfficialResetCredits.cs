@@ -6,7 +6,7 @@ using System.Text.Json;
 
 namespace CodexAccountSwitcher.Core;
 
-public sealed record BankedCredit(string Id, string Status, string ResetType, DateTimeOffset? ExpiresAt);
+public sealed record BankedCredit(string Id, string Status, string ResetType, DateTimeOffset? ExpiresAt, DateTimeOffset? GrantedAt = null);
 public sealed record ResetCreditSnapshot(int? AvailableCount, DateTimeOffset? EarliestExpiry, BankedCredit[]? Credits = null);
 
 public interface IResetCreditService
@@ -122,7 +122,8 @@ public sealed class OfficialResetCredits : IResetCreditService, IDisposable
                     var resetType = type is { ValueKind: JsonValueKind.String } knownType ? knownType.GetString()! : "codexRateLimits";
                     if (resetType is "rate_limit_reset" or "codex_rate_limits") resetType = "codexRateLimits";
                     if (id is { ValueKind: JsonValueKind.String } identifier && !string.IsNullOrWhiteSpace(identifier.GetString()))
-                        banked.Add(new(identifier.GetString()!, "available", resetType, expiry));
+                        banked.Add(new(identifier.GetString()!, "available", resetType, expiry,
+                            Timestamp(Property(entry, "granted_at", "created_at", "grantedAt"))));
                     if (expiry != null && (earliest == null || expiry < earliest)) earliest = expiry;
                 }
                 if (count == null && complete) count = derived;
