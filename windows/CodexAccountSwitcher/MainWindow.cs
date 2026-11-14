@@ -22,6 +22,9 @@ public sealed class MainWindow : Window
     private readonly DispatcherTimer presentationTimer;
     private readonly ScrollViewer scroll = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
     private readonly Grid surface = new();
+    private readonly SwitchProgressPanel switchProgress;
+    private bool switching;
+    private bool switchCompleted;
     private readonly Border updateOverlay = new() { Background = new SolidColorBrush(Color.FromArgb(128, 0, 0, 0)), Visibility = Visibility.Collapsed };
     private UpdateAvailableWindow? updateDialog;
     private bool updateEvaluationQueued;
@@ -42,7 +45,7 @@ public sealed class MainWindow : Window
     private RefreshRotation? resetRotation;
     private QuotaRefreshSelector? quotaRefreshSelector;
     private bool layoutPending, closingForExit;
-    public bool IsBusy => resetRotation != null || client.State.IsMutating || native.IsInstalling;
+    public bool IsBusy => switching || resetRotation != null || client.State.IsMutating || native.IsInstalling;
     public string CurrentPage => page;
     public ScrollViewer PageScrollViewer => scroll;
     private double LayoutWidth => ActualWidth > 0 ? ActualWidth : Width;
@@ -88,7 +91,9 @@ public sealed class MainWindow : Window
         WindowStyle = WindowStyle.SingleBorderWindow; ResizeMode = ResizeMode.CanResize; ShowInTaskbar = true;
         SetResourceReference(BackgroundProperty, "Surface"); WindowStartupLocation = WindowStartupLocation.CenterScreen;
         scroll.SetResourceReference(BackgroundProperty, "Surface");
-        surface.Children.Add(scroll); surface.Children.Add(updateOverlay); Content = surface;
+        switchProgress = new SwitchProgressPanel(() => { scroll.IsEnabled = true; Render(); });
+        surface.Children.Add(scroll); surface.Children.Add(updateOverlay); surface.Children.Add(switchProgress); Content = surface;
+        if (client is ISwitchProgressSource progressSource) progressSource.SwitchProgressChanged += OnSwitchProgress;
         AutomationProperties.SetName(updateOverlay, "更新遮罩");
         if (Application.Current is App application) application.UseThemeSettings(this.native);
         SizeChanged += (_, _) => {
@@ -109,6 +114,7 @@ public sealed class MainWindow : Window
             refreshRotation?.Dispose();
             foreach (var rotation in accountRefreshes.Values) rotation.Dispose();
             resetRotation?.Dispose();
+            if (client is ISwitchProgressSource progressSource) progressSource.SwitchProgressChanged -= OnSwitchProgress;
         };
         Render();
     }
@@ -126,7 +132,26 @@ public sealed class MainWindow : Window
         finally { quietRefreshPending = false; }
     }
     public void Navigate(string destination) { page = destination == "manage" ? "accounts" : destination; target = null; localError = null; Render(); }
+    private void OnSwitchProgress(SwitchProgress progress) {
+        if (!switching) return;
+        if (progress.Percent == 100) switchCompleted = true;
+        switchProgress.Report(progress);
+    }
     private async Task Run(string command, Guid? id = null, bool? value = null, string? language = null) {
+        if (command is "switch" or "restart") {
+            if (IsBusy || State.IsAddingAccount || id == null || closingForExit) return;
+            switching = true; switchCompleted = false; localError = null; scroll.IsEnabled = false; switchProgress.Begin(command == "restart"); Render();
+            try { await client.CommandAsync(command, id, value, language); }
+            catch (Exception ex) { localError = WindowsLocalization.Error(ex.Message, State.Settings.Language); }
+            finally {
+                switching = false;
+                var failure = localError ?? WindowsLocalization.Error(State.Error, State.Settings.Language);
+                if (failure == null && client is ISwitchProgressSource && !switchCompleted) failure = "本次操作未完成，请确认账号状态后重试。";
+                switchProgress.Finish(failure);
+                Render();
+            }
+            return;
+        }
         if (command == "resetQuota") {
             if (IsBusy || State.IsAddingAccount || closingForExit || id == null ||
                 State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage?.ResetCreditsRemaining is not > 0) return;
@@ -309,7 +334,7 @@ public sealed class MainWindow : Window
         Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() => {
             updateEvaluationQueued = false;
             if (closingForExit || updateDialog != null || !IsVisible || !IsActive || !IsEnabled || WindowState == WindowState.Minimized ||
-                IsBusy || State.IsAddingAccount || native.IsChecking || (page != "accounts" && page != "settings") ||
+                IsBusy || switchProgress.Visibility == Visibility.Visible || State.IsAddingAccount || native.IsChecking || (page != "accounts" && page != "settings") ||
                 OwnedWindows.Cast<Window>().Any(window => window.IsVisible)) return;
             var prompt = native.BeginUpdatePrompt(allowAutomatic: page == "accounts");
             if (prompt == null) return;
@@ -572,8 +597,24 @@ public sealed class MainWindow : Window
                 window.RemainingPercent, window.ResetsAt, window.Seconds >= 86400, cached));
     }
 
-    private string ResetSchedule(Usage usage) => string.Join("  ·  ", usage.DisplayWindows().Select(window =>
-        WindowLabel(window.Seconds) + " " + (window.ResetsAt?.ToLocalTime().ToString("MM-dd HH:mm") ?? T("unknown"))));
+    private TextBlock ResetSchedule(Usage usage) {
+        var line = Text(L("额度自动恢复：", "Automatic quota renewal: "), 14, muted: true);
+        line.TextWrapping = TextWrapping.Wrap;
+        AutomationProperties.SetName(line, L("额度自动恢复时间", "Automatic quota renewal time"));
+        var first = true;
+        foreach (var window in usage.DisplayWindows()) {
+            if (!first) line.Inlines.Add(new System.Windows.Documents.Run("  ·  "));
+            first = false;
+            line.Inlines.Add(new System.Windows.Documents.Run(WindowLabel(window.Seconds) + " " +
+                (window.ResetsAt?.ToLocalTime().ToString("MM-dd HH:mm") ?? T("unknown"))));
+            var remaining = new System.Windows.Documents.Run(L("（", " (") + AccountVisuals.QuotaCountdown(window.ResetsAt, now(), Chinese) + L("）", ")")) {
+                FontWeight = FontWeights.SemiBold
+            };
+            remaining.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Success");
+            line.Inlines.Add(remaining);
+        }
+        return line;
+    }
     private void Confirmation(StackPanel body)
     {
         if (target == null) return;
@@ -587,7 +628,7 @@ public sealed class MainWindow : Window
             credits.Margin = new Thickness(0, 16, 0, 0); content.Children.Add(credits);
             var expiry = ResetCreditExpiryLine(usage); expiry.Margin = new Thickness(0, 10, 0, 0); content.Children.Add(expiry);
             content.Children.Add(ResetCardList(usage));
-            var renewal = Text(L("额度自动恢复：", "Automatic quota renewal: ") + ResetSchedule(usage), 14, muted: true); renewal.TextWrapping = TextWrapping.Wrap;
+            var renewal = ResetSchedule(usage);
             renewal.Margin = new Thickness(0, 8, 0, 0); content.Children.Add(renewal);
         }
         var copy = page switch {
@@ -607,7 +648,7 @@ public sealed class MainWindow : Window
         var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right }; buttons.Children.Add(Button(T("cancel"), () => Navigate(confirmationReturnPage)));
         var command = page; var id = target.Profile.Id;
         var resetting = page == "resetQuota" && resetRotation?.Includes(id) == true;
-        var confirm = Button(page == "resetQuota" ? resetting ? L("重置中…", "Resetting…") : L("确认重置", "Confirm reset") : T(command), () => {
+        var confirm = Button(page == "resetQuota" ? resetting ? L("重置中…", "Resetting…") : L("使用最近到期重置", "Use earliest-expiring reset") : T(command), () => {
             if (IsBusy || State.IsAddingAccount || command == "resetQuota" && State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.Usage?.ResetCreditsRemaining is not > 0 ||
                 (command is "switch" or "restart") && QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(row => row.Profile.Id == id)?.UsageError)) return;
             if (command == "resetQuota") _ = Run(command, id);
@@ -616,7 +657,7 @@ public sealed class MainWindow : Window
         if (resetting) AttachResetRotation(confirm);
         confirm.IsEnabled &= !State.IsAddingAccount && (page != "resetQuota" || target.Usage?.ResetCreditsRemaining > 0) &&
             (page is not ("switch" or "restart") || !QuotaReadException.IsAuthenticationFailure(target.UsageError));
-        if (page == "resetQuota") AutomationProperties.SetName(confirm, resetting ? L("重置中…", "Resetting…") : L("确认重置 · 消耗 1 张", "Confirm reset · use one credit"));
+        if (page == "resetQuota") AutomationProperties.SetName(confirm, resetting ? L("重置中…", "Resetting…") : L("使用最近到期重置 · 消耗 1 张", "Use earliest-expiring reset · use one credit"));
         confirm.Margin = new Thickness(10, 0, 0, 0); Primary(confirm); buttons.Children.Add(confirm); content.Children.Add(buttons);
         var box = Box(content); box.MaxWidth = 720; box.HorizontalAlignment = HorizontalAlignment.Stretch; body.Children.Add(box);
     }

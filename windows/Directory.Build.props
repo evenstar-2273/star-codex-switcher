@@ -4,10 +4,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <Version>1.0.17</Version>
-    <InformationalVersion>1.0.17</InformationalVersion>
+    <Version>1.0.18</Version>
+    <InformationalVersion>1.0.18</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <FileVersion>1.0.17.0</FileVersion>
+    <FileVersion>1.0.18.0</FileVersion>
     <Authors>evenstar-2273</Authors>
     <RepositoryUrl>https://github.com/evenstar-2273/star-codex-switcher</RepositoryUrl>
   </PropertyGroup>

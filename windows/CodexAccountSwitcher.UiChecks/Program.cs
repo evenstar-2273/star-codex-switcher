@@ -17,6 +17,12 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.FirstOrDefault() == "--test-switch-progress") {
+            try {
+                var app = new App(false); app.InitializeComponent(); app.ApplyPalette(true);
+                SwitchProgressChecks.Run(app, Path.GetFullPath(args.ElementAtOrDefault(1) ?? ".qa/switch-progress")); return 0;
+            } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
         if (args.Length >= 1 && args[0] == "--test-export") {
             try {
                 var app = new App(false); app.InitializeComponent(); app.ApplyPalette(false);
@@ -439,7 +445,7 @@ internal static class Program
         Assert(client.Commands.Count == before, "Cancelling reset is read-only.");
         All<Button>(window).First(button => Name(button) == "重置额度" && button.IsEnabled).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Render(window, Path.Combine(output, "reset-confirm.png"));
-        var confirm = All<Button>(window).Single(button => Name(button) == "确认重置 · 消耗 1 张");
+        var confirm = All<Button>(window).Single(button => Name(button) == "使用最近到期重置 · 消耗 1 张");
         Assert(!confirm.IsDefault, "Enter cannot consume a reset credit by default.");
         confirm.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Assert(client.Commands.Count == before + 1 && client.Commands.Last() == "resetQuota:" && client.LastAccountId == rows[1].Profile.Id,

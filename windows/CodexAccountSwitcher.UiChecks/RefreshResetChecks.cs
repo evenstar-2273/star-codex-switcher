@@ -101,7 +101,7 @@ internal static class RefreshResetChecks
             Check(window.CurrentPage == "resetQuota", "The reset action still opens its confirmation page.");
             Check(All<TextBlock>(ResetLine(window)).All(text => Equals(text.Foreground, app.Resources["Danger"])), "The urgent expiry color carries through to reset confirmation.");
             Check(ResetLabel(window).Text.EndsWith("（剩余 8 小时 0 分钟）"), "Reset confirmation includes the same exact countdown as its account card.");
-            Check(All<Button>(window).Any(button => Name(button) == "确认重置 · 消耗 1 张"), "Expiry styling does not bypass the explicit one-credit confirmation.");
+            Check(All<Button>(window).Any(button => Name(button) == "使用最近到期重置 · 消耗 1 张"), "Expiry styling does not bypass the explicit one-credit confirmation.");
             Capture(window, Path.Combine(output, $"reset-confirmation-{(dark ? "dark" : "light")}.png"));
             Click(Button(window, "取消")); Pump(40);
         }
@@ -133,7 +133,7 @@ internal static class RefreshResetChecks
         window.Width = 480; Pump(50);
         var confirmation = ResetLabel(window);
         Check(CountdownFits(confirmation, ResetLine(window)) &&
-            confirmation.TranslatePoint(new Point(), window).Y + confirmation.ActualHeight <= Button(window, "确认重置 · 消耗 1 张").TranslatePoint(new Point(), window).Y,
+            confirmation.TranslatePoint(new Point(), window).Y + confirmation.ActualHeight <= Button(window, "使用最近到期重置 · 消耗 1 张").TranslatePoint(new Point(), window).Y,
             "The minimum-width confirmation keeps the complete countdown within its bounds and above the action buttons, wrapping when needed.");
         Capture(window, Path.Combine(output, "reset-confirmation-countdown-narrow.png"));
         Click(Button(window, "取消")); Pump(40);
@@ -345,7 +345,7 @@ internal static class RefreshResetChecks
     }
     private static void ResetInteractions(MainWindow window, Client client, NativeSettings native, string output)
     {
-        const string confirmName = "确认重置 · 消耗 1 张";
+        const string confirmName = "使用最近到期重置 · 消耗 1 张";
         var accountId = client.State.Accounts[2].Profile.Id;
         var activeId = client.State.ActiveAccountID;
         foreach (var dark in new[] { false, true }) {

@@ -2,7 +2,7 @@ namespace CodexAccountSwitcher.Core;
 
 // Retain the signed-in-account UI/core protocol, wrap desktop handoff
 // with online validation and recovery, and stop the host around file import.
-public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAccountExporter, IAsyncDisposable, IDesktopOperations
+public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAccountExporter, IAsyncDisposable, IDesktopOperations, ISwitchProgressSource
 {
     private readonly string dataPath, activeHome;
     private readonly Func<IAccountRuntime> runtimeFactory;
@@ -78,6 +78,8 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
         }
     }
     public event Action? Changed;
+    public event Action<SwitchProgress>? SwitchProgressChanged;
+    private void ReportSwitch(SwitchProgress value) => SwitchProgressChanged?.Invoke(value);
     private void Notify() {
         DetectChangedCredentials();
         // An initial Swift cycle may spend a reset credit. Remember that even
@@ -426,8 +428,16 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
                 if (QuotaReadException.IsAuthenticationFailure(State.Accounts.FirstOrDefault(row => row.Profile.Id == accountID)?.UsageError))
                     throw new IOException("该账号登录已失效，请先重新授权。");
                 busy = true; error = null; AdvanceUsageGeneration(); Notify();
+                ReportSwitch(new(30, "正在关闭 Codex 并等待退出…"));
                 await desktop.CloseAsync(usageLifetime.Token);
-                await desktop.OpenAsync(usageLifetime.Token);
+                using (var maintenance = new SessionVisibilityRepair(activeHome, usageLifetime.Token)) {
+                    var credential = LoginCredential.Read(Path.Combine(activeHome, "auth.json"));
+                    await Task.Run(() => maintenance.Apply(credential, ReportSwitch), usageLifetime.Token);
+                    ReportSwitch(new(88, "正在启动 Codex…"));
+                    try { await desktop.OpenAsync(usageLifetime.Token); }
+                    catch { await desktop.CloseAsync(CancellationToken.None); maintenance.Restore(); throw; }
+                }
+                ReportSwitch(new(100, "Codex 已重启，项目与会话显示检查已完成。"));
                 return;
             }
             if (command != "switch") {
@@ -447,7 +457,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
             // screen. Keep it until fresh results arrive after the handoff.
             busy = true; error = null; AdvanceUsageGeneration(); usageRevisions.Clear(); Notify();
             await core.CommandAsync("dismissError");
-            transaction = new GuardedSwitch(Path.Combine(dataPath, "accounts", accountID.Value.ToString().ToUpperInvariant()), activeHome, validator, desktop);
+            transaction = new GuardedSwitch(Path.Combine(dataPath, "accounts", accountID.Value.ToString().ToUpperInvariant()), activeHome, validator, desktop, ReportSwitch);
             Exception? transportError = null;
             try { await core.CommandAsync(command, accountID); }
             catch (Exception ex) { transportError = ex; }
@@ -455,6 +465,7 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
                 var failure = core.State.Error ?? transportError?.Message ?? "切换未完成。 / Switch failed.";
                 await StopCoreAsync();
                 try {
+                    await desktop.CloseAsync(CancellationToken.None);
                     transaction.RestoreCredential();
                     await InitializeAsync(); // Re-read restored identity; never edit a live host's cached registry.
                     await desktop.OpenAsync(CancellationToken.None);

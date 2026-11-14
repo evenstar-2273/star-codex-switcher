@@ -70,6 +70,16 @@ jobs:
         run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- guarded ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Guarded checks failed.' }
+      - name: Check local project and session restoration
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- session-visibility
+          if ($LASTEXITCODE -ne 0) { throw 'Project and session restoration checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.UiChecks -c Release -- --test-switch-progress ./windows/artifacts/ui
+          if ($LASTEXITCODE -ne 0) { throw 'Switch progress dialog checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.UiChecks -c Release -- --test-account-actions ./windows/artifacts/ui
+          if ($LASTEXITCODE -ne 0) { throw 'Account action and reset presentation checks failed.' }
       - name: Check plan metadata
         timeout-minutes: 5
         shell: pwsh

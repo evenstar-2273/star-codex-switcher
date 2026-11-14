@@ -5,17 +5,19 @@ namespace CodexAccountSwitcher.Core;
 
 // The host pauses usage refreshes before invoking these desktop callbacks.
 // Keep the Windows safety boundary here so both checks surround its credential commit.
-public sealed class GuardedSwitch(string targetHome, string activeHome, ILoginValidator validator, IDesktopOperations desktop)
+public sealed class GuardedSwitch(string targetHome, string activeHome, ILoginValidator validator, IDesktopOperations desktop, Action<SwitchProgress>? progress = null)
     : IDesktopOperations, IDisposable
 {
     private byte[]? original;
     private string? originalAccount;
     private string? targetAccount;
+    private SessionVisibilityRepair? repair;
     public bool CloseAttempted { get; private set; }
     public bool OpenSucceeded { get; private set; }
 
     public async Task CloseAsync(CancellationToken cancellationToken)
     {
+        progress?.Invoke(new(12, "正在验证目标账号…"));
         CheckStorageConfiguration(activeHome);
         var targetPath = Path.Combine(targetHome, "auth.json");
         var target = LoginCredential.Read(targetPath);
@@ -31,7 +33,9 @@ public sealed class GuardedSwitch(string targetHome, string activeHome, ILoginVa
         }
         cancellationToken.ThrowIfCancellationRequested();
         CloseAttempted = true;
+        progress?.Invoke(new(30, "正在关闭 Codex 并等待退出…"));
         await desktop.CloseAsync(cancellationToken);
+        progress?.Invoke(new(44, "正在保存原登录并写入目标凭据…"));
     }
 
     public async Task OpenAsync(CancellationToken cancellationToken)
@@ -40,14 +44,19 @@ public sealed class GuardedSwitch(string targetHome, string activeHome, ILoginVa
         var active = LoginCredential.Read(Path.Combine(activeHome, "auth.json"));
         if (active.AccountID != targetAccount) throw new IOException("写入后账号身份不一致；取消启动。 / Account changed during handoff.");
         await validator.ValidateAsync(active, cancellationToken);
+        repair = new SessionVisibilityRepair(activeHome, cancellationToken);
+        await Task.Run(() => repair.Apply(active, progress), cancellationToken);
+        progress?.Invoke(new(88, "正在启动 Codex…"));
         await desktop.OpenAsync(cancellationToken);
         OpenSucceeded = true;
+        progress?.Invoke(new(100, "账号切换完成，项目与会话显示检查已完成。"));
     }
 
     // Caller must stop the host first, preventing background sync from racing restoration.
     public void RestoreCredential()
     {
         if (!CloseAttempted) return;
+        progress?.Invoke(new(90, "切换未完成，正在恢复原登录和显示状态…"));
         var path = Path.Combine(activeHome, "auth.json");
         SecureFiles.RejectLinks(path);
         if (File.Exists(path)) {
@@ -55,6 +64,7 @@ public sealed class GuardedSwitch(string targetHome, string activeHome, ILoginVa
             if (current.AccountID != targetAccount && current.AccountID != originalAccount)
                 throw new IOException("检测到其他程序已切换账号，已停止自动恢复以保护当前登录。 / Another app changed the active account.");
         }
+        repair?.Restore();
         if (original != null) SecureFiles.AtomicWrite(path, original);
         else if (File.Exists(path)) File.Delete(path);
     }
@@ -76,5 +86,5 @@ public sealed class GuardedSwitch(string targetHome, string activeHome, ILoginVa
         }
     }
 
-    public void Dispose() { if (original != null) CryptographicOperations.ZeroMemory(original); }
+    public void Dispose() { repair?.Dispose(); if (original != null) CryptographicOperations.ZeroMemory(original); }
 }

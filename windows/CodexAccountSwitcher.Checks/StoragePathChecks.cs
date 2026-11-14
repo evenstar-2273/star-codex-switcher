@@ -189,7 +189,7 @@ internal static class StoragePathChecks
         new DirectoryInfo(path).SetAccessControl(restored);
     }
 
-    private static void CreateJunction(string link, string target)
+    internal static void CreateJunction(string link, string target)
     {
         Directory.CreateDirectory(link);
         using var handle = CreateFileW(link, 0x40000000, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
