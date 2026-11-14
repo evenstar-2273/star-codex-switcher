@@ -380,7 +380,9 @@ internal static class Program
             window.Width = width; window.Height = 760;
             window.Navigate("accounts"); Render(window, Path.Combine(output, $"responsive-{width:0.##}.png"));
             AssertResponsiveLayout(width);
-            Assert(!All<ScrollViewer>(window).Any(view => view.ComputedHorizontalScrollBarVisibility == Visibility.Visible), "Narrow layout never needs horizontal scrolling.");
+            // Collapsed overlays have not been measured; their computed scrollbar
+            // visibility retains WPF's default and does not describe rendered UI.
+            Assert(!All<ScrollViewer>(window).Any(view => view.IsVisible && view.ComputedHorizontalScrollBarVisibility == Visibility.Visible), "Narrow layout never needs horizontal scrolling.");
             Assert(All<TextBlock>(window).Count(text => text.Text == "5 小时剩余") == 4, "Only accounts with a five-hour window show that quota, regardless of the removed preference.");
             Assert(All<TextBlock>(window).Where(text => text.Text.Contains(" 恢复（")).All(text => text.Text.Contains("剩余") && text.TextWrapping == TextWrapping.Wrap && text.TextTrimming == TextTrimming.None),
                 "Renewal timestamps include a countdown that can wrap without truncation on narrow cards.");
@@ -494,7 +496,7 @@ internal static class Program
         var chips = All<Button>(window).Where(button => Name(button).StartsWith("主题色：")).ToArray();
         Assert(chips.Length == 4 && chips.All(button => button.ActualWidth > 0 && button.TranslatePoint(new Point(), window).X + button.ActualWidth < window.ActualWidth),
             "All four accent controls remain within the narrow window.");
-        Assert(!All<ScrollViewer>(window).Any(view => view.ComputedHorizontalScrollBarVisibility == Visibility.Visible), "Accent controls wrap without horizontal scrolling.");
+        Assert(!All<ScrollViewer>(window).Any(view => view.IsVisible && view.ComputedHorizontalScrollBarVisibility == Visibility.Visible), "Accent controls wrap without horizontal scrolling.");
         Assert(chips.Select(button => Math.Round(button.TranslatePoint(new Point(), window).Y)).Distinct().Count() >= 2, "The narrow fixture actually wraps accent choices into multiple rows.");
         Assert(client.Commands.Count == before, "Appearance changes never send account commands.");
         importDialog.Close();
