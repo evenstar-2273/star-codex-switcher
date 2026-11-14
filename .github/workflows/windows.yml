@@ -76,6 +76,8 @@ jobs:
         run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- session-visibility
           if ($LASTEXITCODE -ne 0) { throw 'Project and session restoration checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- project-aliases
+          if ($LASTEXITCODE -ne 0) { throw 'Native project alias preservation checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.UiChecks -c Release -- --test-switch-progress ./windows/artifacts/ui
           if ($LASTEXITCODE -ne 0) { throw 'Switch progress dialog checks failed.' }
           dotnet run --project windows/CodexAccountSwitcher.UiChecks -c Release -- --test-account-actions ./windows/artifacts/ui

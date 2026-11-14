@@ -8,6 +8,8 @@ if (args.FirstOrDefault() == "app-server") {
 
 if (args.FirstOrDefault() == "guarded") return await GuardedChecks.RunAsync(args.ElementAtOrDefault(1));
 if (args.FirstOrDefault() == "session-visibility") return await SessionVisibilityChecks.RunAsync();
+if (args.FirstOrDefault() == "project-aliases") return ProjectAliasChecks.Run();
+if (args.FirstOrDefault() == "project-alias-inspect" && args.Length == 2) return ProjectAliasChecks.Inspect(Path.GetFullPath(args[1]));
 if (args.FirstOrDefault() == "account-export") return AccountExportChecks.Run();
 if (args.FirstOrDefault() == "plans") return await PlanChecks.RunAsync();
 if (args.FirstOrDefault() == "reset-credits") return await ResetCreditsChecks.RunAsync();

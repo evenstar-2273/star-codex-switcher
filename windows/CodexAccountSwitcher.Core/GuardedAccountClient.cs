@@ -436,8 +436,8 @@ public sealed class GuardedAccountClient : IAccountClient, IAccountImporter, IAc
                     ReportSwitch(new(88, "正在启动 Codex…"));
                     try { await desktop.OpenAsync(usageLifetime.Token); }
                     catch { await desktop.CloseAsync(CancellationToken.None); maintenance.Restore(); throw; }
+                    ReportSwitch(new(100, "Codex 已重启。", maintenance.ProjectNotice));
                 }
-                ReportSwitch(new(100, "Codex 已重启，项目与会话显示检查已完成。"));
                 return;
             }
             if (command != "switch") {

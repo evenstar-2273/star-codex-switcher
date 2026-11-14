@@ -36,17 +36,46 @@ internal static class SwitchProgressChecks
                 Check(All<TextBlock>(panel).Any(text => text.Text == "正在恢复本地项目分组…") && All<ProgressBar>(panel).Single().Value == 58, "Actual backend progress reaches the popup");
                 Check(All<Border>(panel).Any(border => border.Background is SolidColorBrush brush && brush.Color.A == 255), "Popup has opaque themed surface over dimmed owner");
                 Capture(window, Path.Combine(output, dark ? "switch-progress-dark.png" : "switch-progress-light-narrow.png"));
+                var completedAt = Stopwatch.StartNew();
                 client.Complete(dark ? null : "项目数据库正被其他进程占用，已恢复原登录。请关闭相关窗口后重试。");
                 Wait(() => run.IsCompleted); Pump();
-                Check(!panel.Running && !window.IsBusy && panel.Visibility == Visibility.Visible, "Result stays visible until explicitly closed");
+                Check(!panel.Running && !window.IsBusy && panel.Visibility == Visibility.Visible, "Result is initially visible after completion");
                 Check(All<TextBlock>(panel).Any(text => dark ? text.Text == "操作完成" : text.Text == "操作未完成"), "Errors are not presented as success");
                 Check(All<ProgressBar>(panel).Single().Value == (dark ? 100 : 58), "Failure must not advance to 100 percent");
                 var close = All<Button>(panel).Single(button => AutomationProperties.GetName(button) == "关闭切号进度");
                 Check(close.IsVisible && close.IsEnabled, "Result close action is reachable in a narrow window");
                 Capture(window, Path.Combine(output, dark ? "switch-complete-dark.png" : "switch-failure-light-narrow.png"));
-                close.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                if (dark) {
+                    Wait(() => completedAt.ElapsedMilliseconds >= 1500);
+                    Check(panel.Visibility == Visibility.Visible, "Success remains readable before the 2.5-second timeout");
+                    Wait(() => panel.Visibility == Visibility.Collapsed);
+                    Check(completedAt.ElapsedMilliseconds >= 2200 && completedAt.ElapsedMilliseconds < 3500, "Success automatically closes after 2.5 seconds");
+                } else {
+                    Wait(() => completedAt.ElapsedMilliseconds >= 2700);
+                    Check(panel.Visibility == Visibility.Visible, "Failure stays open beyond the success timeout");
+                    close.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                }
                 Check(panel.Visibility == Visibility.Collapsed && window.PageScrollViewer.IsEnabled, "Closing result restores account-list interactions");
             }
+            var overlay = All<SwitchProgressPanel>(window).Single();
+            overlay.Begin(false);
+            overlay.Report(new(72, "正在检查会话…", "重复项目入口未强制合并，会话关联已保留。"));
+            overlay.Finish(null);
+            Check(All<TextBlock>(overlay).Any(text => text.Text == "重复项目入口未强制合并，会话关联已保留。"), "Ambiguous project result is not overwritten by a success claim");
+            var firstResult = Stopwatch.StartNew();
+            Wait(() => firstResult.ElapsedMilliseconds >= 1000);
+            overlay.Begin(true);
+            Wait(() => firstResult.ElapsedMilliseconds >= 2800);
+            Check(overlay.Running && overlay.Visibility == Visibility.Visible, "An earlier result timer cannot close a new operation");
+            overlay.Finish(null);
+            Check(All<TextBlock>(overlay).Any(text => text.Text == "本地项目与会话显示检查已完成。"), "New operation clears the previous diagnostic");
+            var button = All<Button>(overlay).Single(button => AutomationProperties.GetName(button) == "关闭切号进度");
+            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+            overlay.Begin(false);
+            var manualClosedAt = Stopwatch.StartNew();
+            Wait(() => manualClosedAt.ElapsedMilliseconds >= 2700);
+            Check(overlay.Visibility == Visibility.Visible && overlay.Running, "Manual close cancels its pending timer");
+            overlay.Finish("测试结束"); button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Console.WriteLine($"PASS: {checks} switch progress assertions (dark/light, narrow, success/failure, input blocking).");
         } finally { window.CloseForExit(); Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(key, false); System.Threading.SynchronizationContext.SetSynchronizationContext(previousContext); }
     }

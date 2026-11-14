@@ -24,7 +24,7 @@ internal static class ProjectAccountState
     ];
     private static readonly HashSet<string> SharedAtoms = ["last_completed_onboarding", "electron:onboarding-projectless-completed",
         "electron:bedrock-govcloud-guidance-acknowledged", "ctrl-tab-shortcut-notice-shown", "number-shortcut-notice-shown", "thread-sort-key"];
-    internal sealed record Project(string Id, JsonObject Metadata, string[] Roots);
+    internal sealed record Project(string Id, JsonObject Metadata, string[] Roots, string[]? ImportKeys = null);
     internal sealed record Thread(string Id, string? ProjectId, string? Cwd, bool User, string? Section);
     internal static string? Owner(LoginCredential credential)
     {
@@ -55,6 +55,26 @@ internal static class ProjectAccountState
     }
     private static string RootsKey(IEnumerable<string> paths) => string.Join("\n", paths.Select(PathKey).Distinct().Order(StringComparer.Ordinal));
     private static bool LocalRoot(string root) => Path.IsPathFullyQualified(root) && !root.Split('/', '\\').Any(part => part.Equals(".chatgpt-projects", StringComparison.OrdinalIgnoreCase));
+    // Read-only diagnostic: multiple existing aliases are ambiguous, not a reason
+    // to delete a group or rewrite its memberships. Includes native unscoped state.
+    internal static bool HasAmbiguousProjectMappings(JsonObject state, string home)
+    {
+        var sources = new[] { state }.Concat(Object(Object(state[Scopes])["inactive"])
+            .Select(pair => Object(Object(pair.Value)["globals"])));
+        foreach (var source in sources) {
+            var entries = Object(source["local-projects"]);
+            foreach (var host in Object(source[Map])) {
+                if (!host.Key.StartsWith("local:") || PathKey(host.Key[6..]) != PathKey(home)) continue;
+                var ids = new HashSet<string>(StringComparer.Ordinal);
+                var map = Object(host.Value);
+                foreach (var entry in entries.Where(pair => pair.Value is JsonObject project && !Cloud(project))) {
+                    var id = String(map[entry.Key]) ?? entry.Key;
+                    if (!ids.Add(id)) return true;
+                }
+            }
+        }
+        return false;
+    }
     internal static JsonObject Prepare(JsonObject before, string owner, string home, IReadOnlyList<Project> projects, IReadOnlyList<Thread> threads)
     {
         // Unscoped older profiles belong to Desktop; don't invent an owner or clear their state.

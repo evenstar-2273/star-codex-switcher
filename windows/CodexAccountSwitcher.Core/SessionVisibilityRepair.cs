@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 
 namespace CodexAccountSwitcher.Core;
 
-public sealed record SwitchProgress(int Percent, string Message);
+public sealed record SwitchProgress(int Percent, string Message, string? Notice = null);
 public interface ISwitchProgressSource { event Action<SwitchProgress>? SwitchProgressChanged; }
 
 // Local, bounded launch maintenance. Apply only after Desktop stops and target
@@ -33,6 +33,8 @@ internal sealed class SessionVisibilityRepair : IDisposable
     private sealed record TimeEdit(string Path, long Length, DateTime Before, DateTime After);
     internal int RepairedThreads { get; private set; }
     internal bool RestoredProjects => afterState != null;
+    internal string? ProjectNotice { get; private set; }
+    internal int CorrectedProjectAliases { get; private set; }
     internal SessionVisibilityRepair(string home, CancellationToken cancellation) { this.home = Path.GetFullPath(home); this.cancellation = cancellation; }
     private void Check() { cancellation.ThrowIfCancellationRequested(); if (clock.Elapsed > Budget) throw new IOException("项目与会话检查超时，已停止本次修复，请稍后重试。"); }
     internal void Apply(LoginCredential target, Action<SwitchProgress>? report)
@@ -49,16 +51,23 @@ internal sealed class SessionVisibilityRepair : IDisposable
                 var edit = new DatabaseEdit(path, db); edits.Add(edit); db.Query("BEGIN IMMEDIATE");
             }
             report?.Invoke(new(58, "正在恢复本地项目分组…"));
-            if (before != null && before.ContainsKey(ProjectAccountState.Scopes)) {
-                var owner = ProjectAccountState.Owner(target) ?? throw new IOException("目标凭据缺少项目归属信息，请重新授权后再切换；原项目状态已保留。");
+            if (before != null && (before.ContainsKey(ProjectAccountState.Scopes) || before.ContainsKey("local-projects"))) {
                 var (projects, threads) = ReadProjects(before);
-                var after = ProjectAccountState.Prepare(before, owner, home, projects, threads);
+                var aliases = NativeProjectAliases.Normalize(before, home, projects, Check);
+                CorrectedProjectAliases = aliases.Corrected;
+                var after = aliases.State;
+                if (before.ContainsKey(ProjectAccountState.Scopes)) {
+                    var owner = ProjectAccountState.Owner(target) ?? throw new IOException("目标凭据缺少项目归属信息，请重新授权后再切换；原项目状态已保留。");
+                    after = ProjectAccountState.Prepare(after, owner, home, projects, threads);
+                }
+                if (ProjectAccountState.HasAmbiguousProjectMappings(after, home))
+                    ProjectNotice = "部分重复项目入口缺少一致的导入记录，已保留原项目与会话关联，未自动处理。";
                 if (!JsonNode.DeepEquals(before, after)) {
                     afterState = JsonSerializer.SerializeToUtf8Bytes(after);
                     if (afterState.Length > 20_000_000) throw new IOException("项目状态文件过大，已停止本次修复。");
                 }
             }
-            report?.Invoke(new(72, "正在检查并修复会话显示…"));
+            report?.Invoke(new(72, "正在检查并修复会话显示…", ProjectNotice));
             foreach (var edit in edits) PlanThreads(edit, provider);
             // All schema/identity/file checks finish before the first write.
             Check();
@@ -110,12 +119,16 @@ internal sealed class SessionVisibilityRepair : IDisposable
             if (cols.Count == 0 && roots.Count == 0) continue;
             if (!cols.IsSupersetOf(["id", "name"]) || !roots.IsSupersetOf(["project_id", "path"])) throw new IOException("项目数据库结构暂不兼容，已停止切换并保留原数据。");
             var projects = new List<ProjectAccountState.Project>();
+            var imports = db.Columns("project_idempotency_keys").IsSupersetOf(["key", "project_id"])
+                ? db.Query("SELECT key,project_id FROM project_idempotency_keys").Where(r => r["key"] != null && r["project_id"] != null)
+                    .GroupBy(r => r["project_id"]!).ToDictionary(g => g.Key, g => g.Select(r => r["key"]!).ToArray())
+                : new Dictionary<string, string[]>();
             foreach (var row in db.Query("SELECT id," + (cols.Contains("metadata") ? "metadata" : "'{}' AS metadata") + " FROM projects ORDER BY id LIMIT 20001")) {
                 Check();
                 var metadata = JsonNode.Parse(row["metadata"] ?? "{}") as JsonObject ?? throw new IOException("项目元数据格式损坏，已停止修复。");
                 var paths = db.Query("SELECT path FROM project_roots WHERE project_id=?1 ORDER BY path LIMIT 33", row["id"]).Select(r => r["path"]!).ToArray();
                 if (paths.Length > 32) throw new IOException("项目目录记录过多，已停止本次快速修复。");
-                projects.Add(new(row["id"]!, metadata, paths));
+                projects.Add(new(row["id"]!, metadata, paths, imports.GetValueOrDefault(row["id"]!, [])));
             }
             var tc = db.Columns("threads");
             if (tc.Count == 0) return (projects, []);

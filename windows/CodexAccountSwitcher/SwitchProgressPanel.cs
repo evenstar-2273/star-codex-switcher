@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 using CodexAccountSwitcher.Core;
 
 namespace CodexAccountSwitcher;
@@ -13,9 +14,15 @@ public sealed class SwitchProgressPanel : Grid
     private readonly ProgressBar progress;
     private readonly Button close;
     private bool running;
+    private string? notice;
+    private readonly DispatcherTimer autoClose = new() { Interval = TimeSpan.FromSeconds(2.5) };
+    private readonly Action dismissed;
     public bool Running => running;
     public SwitchProgressPanel(Action dismissed)
     {
+        this.dismissed = dismissed;
+        autoClose.Tick += (_, _) => Dismiss();
+        Unloaded += (_, _) => autoClose.Stop();
         Background = new SolidColorBrush(Color.FromArgb(150, 0, 0, 0));
         Visibility = Visibility.Collapsed; Focusable = true;
         AutomationProperties.SetName(this, "切号进度弹窗");
@@ -34,7 +41,7 @@ public sealed class SwitchProgressPanel : Grid
         status = Text("只维护本机项目和会话显示，请等待操作完成。", 14, "Muted"); body.Children.Add(status);
         close = new Button { Content = "关闭", HorizontalAlignment = HorizontalAlignment.Right, MinWidth = 88, Padding = new Thickness(16, 9, 16, 9), Visibility = Visibility.Collapsed };
         close.SetResourceReference(StyleProperty, "ActionButton"); AutomationProperties.SetName(close, "关闭切号进度");
-        close.Click += (_, _) => { if (!running) { Visibility = Visibility.Collapsed; dismissed(); } }; body.Children.Add(close);
+        close.Click += (_, _) => Dismiss(); body.Children.Add(close);
         var card = new Border { CornerRadius = new CornerRadius(16), BorderThickness = new Thickness(1), HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center, MaxWidth = 570, Margin = new Thickness(20), Child = new ScrollViewer { Content = body, VerticalScrollBarVisibility = ScrollBarVisibility.Auto } };
         card.SetResourceReference(Border.BackgroundProperty, "ListSurface"); card.SetResourceReference(Border.BorderBrushProperty, "Line");
@@ -44,6 +51,7 @@ public sealed class SwitchProgressPanel : Grid
     }
     public void Begin(bool restart)
     {
+        autoClose.Stop(); notice = null;
         running = true; title.Text = restart ? "正在重启 Codex" : "正在切换账号"; detail.Text = "正在准备，请稍候…";
         progress.Value = 0; progress.IsIndeterminate = true; close.Visibility = Visibility.Collapsed;
         status.Text = "只维护本机项目和会话显示，请等待操作完成。"; status.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
@@ -53,13 +61,22 @@ public sealed class SwitchProgressPanel : Grid
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(() => Report(value))); return; }
         if (!running) return;
+        if (value.Notice != null) notice = value.Notice;
         progress.IsIndeterminate = false; progress.Value = value.Percent; detail.Text = value.Message;
     }
     public void Finish(string? error)
     {
+        autoClose.Stop();
         running = false; progress.IsIndeterminate = false; close.Visibility = Visibility.Visible;
-        if (error == null) { progress.Value = 100; title.Text = "操作完成"; detail.Text = "Codex 已启动"; status.Text = "本地项目与会话显示检查已完成。"; status.SetResourceReference(TextBlock.ForegroundProperty, "Success"); }
+        if (error == null) { progress.Value = 100; title.Text = "操作完成"; detail.Text = "Codex 已启动"; status.Text = notice ?? "本地项目与会话显示检查已完成。"; status.SetResourceReference(TextBlock.ForegroundProperty, notice == null ? "Success" : "Warning"); autoClose.Start(); }
         else { title.Text = "操作未完成"; detail.Text = "请查看下面的处理结果"; status.Text = error; status.SetResourceReference(TextBlock.ForegroundProperty, "Danger"); }
         close.Focus();
+    }
+    private void Dismiss()
+    {
+        autoClose.Stop();
+        if (running || Visibility != Visibility.Visible) return;
+        Visibility = Visibility.Collapsed;
+        dismissed();
     }
 }

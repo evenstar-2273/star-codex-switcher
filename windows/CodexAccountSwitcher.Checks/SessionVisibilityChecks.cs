@@ -104,6 +104,37 @@ internal static class SessionVisibilityChecks
             Check(File.ReadAllText(statePath) == "{broken", "Corrupt state is not silently replaced");
             File.WriteAllBytes(statePath, original);
             var localRegistry = new[] { new ProjectAccountState.Project("registry-project", new JsonObject(), [@"D:\Work"]) };
+            Check(!ProjectAccountState.HasAmbiguousProjectMappings(state, active), "One mapped project does not trigger a duplicate warning");
+            var duplicate = (JsonObject)state.DeepClone();
+            duplicate["local-projects"]!["registry-project"] = duplicate["local-projects"]!["local-a"]!.DeepClone();
+            duplicate[ProjectAccountState.Map]![host]!["registry-project"] = "registry-project";
+            duplicate["project-order"]!.AsArray().Add("registry-project");
+            duplicate[ProjectAccountState.Assign]!["json-only"] = new JsonObject { ["projectKind"] = "local", ["projectId"] = "registry-project" };
+            duplicate["sidebar-project-thread-orders"]!["registry-project"] = new JsonObject { ["threadIds"] = new JsonArray("json-only") };
+            Check(ProjectAccountState.HasAmbiguousProjectMappings(duplicate, active), "Canonical and legacy IDs mapped to one project are diagnosed");
+            var duplicateOriginal = duplicate.ToJsonString();
+            var duplicateSameOwner = ProjectAccountState.Prepare(duplicate, aOwner, active, localRegistry, []);
+            Check(JsonNode.DeepEquals(duplicateSameOwner["local-projects"], duplicate["local-projects"]) &&
+                JsonNode.DeepEquals(duplicateSameOwner[ProjectAccountState.Assign], duplicate[ProjectAccountState.Assign]) &&
+                JsonNode.DeepEquals(duplicateSameOwner["sidebar-project-thread-orders"], duplicate["sidebar-project-thread-orders"]),
+                "Ambiguous aliases retain both entries, all memberships and JSON-only thread order");
+            var duplicateOtherOwner = ProjectAccountState.Prepare(duplicate, bOwner, active, localRegistry, []);
+            Check(duplicateOtherOwner["local-projects"]?["local-a"] == null && duplicateOtherOwner["local-projects"]?["registry-project"] == null &&
+                JsonNode.DeepEquals(duplicateOtherOwner[ProjectAccountState.Scopes]!["inactive"]![aOwner]!["globals"]![ProjectAccountState.Assign], duplicate[ProjectAccountState.Assign]),
+                "Ambiguous projects are skipped for another scope while original associations remain archived intact");
+            Check(duplicate.ToJsonString() == duplicateOriginal, "Planning never mutates its input");
+            duplicate.Remove(ProjectAccountState.Scopes);
+            duplicate["electron-owner-value:selected-project:fixture"] = new JsonObject { ["type"] = "local", ["projectId"] = "registry-project" };
+            var duplicateBytes = JsonSerializer.SerializeToUtf8Bytes(duplicate); File.WriteAllBytes(statePath, duplicateBytes);
+            using (var repair = new SessionVisibilityRepair(active, default)) {
+                var duplicateStages = new List<SwitchProgress>(); repair.Apply(b, duplicateStages.Add);
+                Check(repair.ProjectNotice != null && duplicateStages.Any(stage => stage.Notice == repair.ProjectNotice), "Unscoped native duplicate state reports the unresolved result");
+                Check(File.ReadAllBytes(statePath).SequenceEqual(duplicateBytes), "Native state, both project entries and owner-value keys stay byte-for-byte intact");
+                using var db = Open(dbPath);
+                Check(db.Query("SELECT id,project_id FROM threads").Count == 4 && db.Query("SELECT id FROM threads WHERE project_id='registry-project'").Count == 4 && File.ReadAllText(rollout) == contents,
+                    "Duplicate diagnostics neither delete sessions nor alter database project memberships or rollout contents");
+            }
+            File.WriteAllBytes(statePath, original);
             var deleted = (JsonObject)state.DeepClone();
             deleted["app-server-pending-project-deletions-by-host"] = new JsonObject { [host] = new JsonObject { ["local-a"] = new JsonObject { ["projectId"] = "registry-project" } } };
             Check(ProjectAccountState.Prepare(deleted, bOwner, active, localRegistry, [])["local-projects"]?["local-a"] == null,

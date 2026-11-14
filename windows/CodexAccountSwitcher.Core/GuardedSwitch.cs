@@ -49,7 +49,7 @@ public sealed class GuardedSwitch(string targetHome, string activeHome, ILoginVa
         progress?.Invoke(new(88, "正在启动 Codex…"));
         await desktop.OpenAsync(cancellationToken);
         OpenSucceeded = true;
-        progress?.Invoke(new(100, "账号切换完成，项目与会话显示检查已完成。"));
+        progress?.Invoke(new(100, "账号切换完成，Codex 已启动。", repair.ProjectNotice));
     }
 
     // Caller must stop the host first, preventing background sync from racing restoration.
