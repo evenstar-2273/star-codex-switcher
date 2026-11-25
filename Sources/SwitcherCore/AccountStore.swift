@@ -386,6 +386,13 @@ public actor AccountStore: AccountStoring {
         guard let profile = current.accounts.first(where: { $0.id == id }) else {
             throw AccountStoreError.profileNotFound
         }
+        var protectedLiveIdentity: AccountIdentity?
+        if activeCredentialExists() {
+            let bytes = try readChecked(activeHomeURL.appending(path: "auth.json"))
+            if try preserveReauthorizedCredential(profile: profile, liveBytes: bytes) {
+                protectedLiveIdentity = try CredentialIdentity.decode(bytes)
+            }
+        }
         var cache = try loadUsageCache()
         if cache.entries.contains(where: { $0.profileID == id }) {
             cache.entries.removeAll(where: { $0.profileID == id })
@@ -397,6 +404,9 @@ public actor AccountStore: AccountStoring {
         let identity = AccountIdentity(accountID: profile.accountID, email: profile.email)
         if !current.removedAccountIdentities.contains(where: { identity.matches($0) }) {
             current.removedAccountIdentities.append(identity)
+        }
+        if let old = protectedLiveIdentity, !current.removedAccountIdentities.contains(where: { old.matches($0) }) {
+            current.removedAccountIdentities.append(old)
         }
         try saveRegistry(current)
         do {

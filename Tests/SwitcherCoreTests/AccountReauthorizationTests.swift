@@ -48,6 +48,10 @@ struct AccountReauthorizationTests {
         #expect(try Data(contentsOf: home.appending(path: "auth.json")) == fresh)
         #expect(try !CredentialIdentity.reauthorizationMatches(saved: fresh, received: identityBytes(email: "new@example.test", user: "someone-else")))
         #expect(try !CredentialIdentity.reauthorizationMatches(saved: fresh, received: identityBytes(email: "new@example.test", organization: "other-org")))
+        try await fixture.store.removeAccount(id: original.id)
+        let afterRemoval = try await fixture.store.syncActiveCredential()
+        #expect(afterRemoval.accounts.count == 1 && afterRemoval.activeAccountID == nil)
+        #expect(try Data(contentsOf: fixture.live) == oldLive)
     }
 
     @Test func renewingSignedOutAccountKeepsIdentityMetadataAndDoesNotSignInDesktop() async throws {
