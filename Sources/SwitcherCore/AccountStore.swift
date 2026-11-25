@@ -279,7 +279,7 @@ public actor AccountStore: AccountStoring {
             let live = activeHomeURL.appending(path: "auth.json")
             if fileManager.fileExists(atPath: live.path) {
                 let oldLive = try readChecked(live)
-                if let oldIdentity = try CredentialIdentity.decode(oldLive), oldIdentity.matches(existing) {
+                if try CredentialIdentity.reauthorizationMatches(saved: previous, received: oldLive) {
                     // Persist only a fingerprint, never a second copy of the old token.
                     // A later refresh/restart must not overwrite this renewal with that exact old login.
                     try Task.checkCancellation()
@@ -358,6 +358,14 @@ public actor AccountStore: AccountStoring {
         let bytes = try readChecked(activeHomeURL.appending(path: "auth.json"))
         guard let identity = try CredentialIdentity.decode(bytes) else {
             throw CodexClientError.identityUnavailable
+        }
+        // The desktop may still hold the pre-renewal email. Resolve its exact protected
+        // fingerprint before email matching, or synchronization would recreate the old row.
+        for profile in current.accounts where profile.accountID == identity.accountID {
+            if try preserveReauthorizedCredential(profile: profile, liveBytes: bytes) {
+                if current.activeAccountID != profile.id { try commitActiveAccountID(profile.id) }
+                return try loadRegistry()
+            }
         }
         if !includeRemoved,
            !current.accounts.contains(where: { identity.matches($0) }),
