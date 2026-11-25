@@ -3,6 +3,44 @@ import Testing
 @testable import SwitcherCore
 
 struct AccountReauthorizationTests {
+    private func identityBytes(email: String, user: String = "user", workspace: String = "workspace", organization: String = "org") throws -> Data {
+        let claims: [String: Any] = ["sub": user, "email": email, "https://api.openai.com/auth":
+            ["chatgpt_user_id": user, "chatgpt_account_id": workspace, "organization_id": organization]]
+        let payload = try JSONSerialization.data(withJSONObject: claims).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        return try JSONSerialization.data(withJSONObject: ["tokens": ["id_token": "e30.\(payload).sig", "access_token": "e30.\(payload).sig", "account_id": workspace]])
+    }
+
+    @Test func renewedEmailUsesSavedIdentityAndNeverTakesAnotherRecord() async throws {
+        let fixture = try RenewalFixture(); defer { fixture.clean() }
+        let original = fixture.profile("workspace", name: "Keep my label")
+        let home = try await fixture.stage(original, token: "old")
+        try identityBytes(email: "renewal@example.test").write(to: home.appending(path: "auth.json"))
+        try await fixture.store.addProfile(original)
+        let other = fixture.profile("different-workspace")
+        _ = try await fixture.save(other, token: "other")
+        let renewal = AccountProfile(id: UUID(), displayName: "new", email: "new@example.test", accountID: "workspace", createdAt: Date())
+        let temporary = try await fixture.stage(renewal, token: "fresh")
+        let fresh = try identityBytes(email: "new@example.test")
+        try fresh.write(to: temporary.appending(path: "auth.json"))
+        try await fixture.store.addProfile(renewal, replacingAccountID: original.id)
+        var registry = try await fixture.store.loadRegistry()
+        #expect(registry.accounts.count == 2)
+        #expect(registry.accounts[0].id == original.id && registry.accounts[0].displayName == "Keep my label")
+        #expect(registry.accounts[0].email == "new@example.test")
+        #expect(try Data(contentsOf: home.appending(path: "auth.json")) == fresh)
+        // Same user/workspace but the next email belongs to a different saved record.
+        let conflict = fixture.profile("workspace")
+        let conflictHome = try await fixture.stage(conflict, token: "conflict")
+        try identityBytes(email: "renewal@example.test").write(to: conflictHome.appending(path: "auth.json"))
+        await #expect(throws: (any Error).self) { try await fixture.store.addProfile(conflict, replacingAccountID: original.id) }
+        registry = try await fixture.store.loadRegistry()
+        #expect(registry.accounts.count == 2 && registry.accounts[0].email == "new@example.test")
+        #expect(try Data(contentsOf: home.appending(path: "auth.json")) == fresh)
+        #expect(try !CredentialIdentity.reauthorizationMatches(saved: fresh, received: identityBytes(email: "new@example.test", user: "someone-else")))
+        #expect(try !CredentialIdentity.reauthorizationMatches(saved: fresh, received: identityBytes(email: "new@example.test", organization: "other-org")))
+    }
+
     @Test func renewingSignedOutAccountKeepsIdentityMetadataAndDoesNotSignInDesktop() async throws {
         let fixture = try RenewalFixture()
         defer { fixture.clean() }

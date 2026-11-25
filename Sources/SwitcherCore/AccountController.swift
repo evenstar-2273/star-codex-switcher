@@ -274,10 +274,7 @@ open class AccountController {
             try Task.checkCancellation()
             let identity = try await codex.login(profileHome: home)
             try Task.checkCancellation()
-            if let replacingAccountID {
-                let target = try await store.profile(id: replacingAccountID)
-                guard identity.matches(target) else { throw CodexClientError.authorizedAccountMismatch }
-            }
+            // The store verifies saved user/workspace claims atomically with the renewal.
             let profile = AccountProfile(
                 id: id,
                 displayName: identity.suggestedDisplayName,

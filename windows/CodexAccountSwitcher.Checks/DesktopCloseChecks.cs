@@ -16,6 +16,9 @@ internal static class DesktopCloseChecks
         Directory.CreateDirectory(Path.GetDirectoryName(newExecutable)!);
         try
         {
+            Require(DesktopController.IsOtherPackage("OpenAI.Codex_publisher!App", "OpenAI.ChatGPT_publisher"), "Separate ChatGPT Store package cannot block or be closed by Codex switching.");
+            Require(!DesktopController.IsOtherPackage("OpenAI.Codex_publisher!App", "openai.codex_publisher"), "Same package family comparison is case insensitive.");
+            Require(!DesktopController.IsOtherPackage("unidentified", "OpenAI.ChatGPT_publisher"), "Unknown ownership cannot be classified as unrelated.");
             await VerifyRunningPackageIdentityAsync();
             CopyFixture(fixtureExecutable, Path.GetDirectoryName(oldExecutable)!);
             CopyFixture(fixtureExecutable, Path.GetDirectoryName(newExecutable)!);

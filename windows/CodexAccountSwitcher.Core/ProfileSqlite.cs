@@ -13,7 +13,7 @@ internal sealed class ProfileSqlite : IDisposable
     {
         SecureFiles.RejectLinks(path);
         foreach (var suffix in new[] { "-wal", "-shm", "-journal" }) SecureFiles.RejectLinks(path + suffix);
-        stop = () => ct.IsCancellationRequested || clock.Elapsed > budget;
+        stop = () => ct.IsCancellationRequested || (budget != Timeout.InfiniteTimeSpan && clock.Elapsed > budget);
         progress = _ => stop() ? 1 : 0;
         var result = sqlite3_open_v2(path, out db, write ? 2 : 1, IntPtr.Zero);
         if (result != 0) { Dispose(); throw Error(result); }
@@ -32,7 +32,7 @@ internal sealed class ProfileSqlite : IDisposable
             }
             var rows = new List<Dictionary<string, string?>>();
             while ((result = sqlite3_step(statement)) == 100) {
-                if (stop() || rows.Count >= 20000) throw new IOException("会话记录较多，本次快速检查已停止；原有数据已保留。");
+                if (stop()) throw new IOException("项目与会话检查超时或已取消；原有数据已保留。");
                 var row = new Dictionary<string, string?>(StringComparer.Ordinal);
                 for (var i = 0; i < sqlite3_column_count(statement); i++)
                     row[Marshal.PtrToStringUTF8(sqlite3_column_name(statement, i))!] = sqlite3_column_type(statement, i) == 5 ? null : Marshal.PtrToStringUTF8(sqlite3_column_text(statement, i));

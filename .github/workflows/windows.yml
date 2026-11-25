@@ -58,12 +58,14 @@ jobs:
         run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- native-authorization ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Native authorization and local deletion checks failed.' }
-      - name: Check current account removal
+      - name: Check current account removal and reauthorization
         timeout-minutes: 5
         shell: pwsh
         run: |
           dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- account-removal ./windows/artifacts/installer-runtime/SwitcherHost.exe
           if ($LASTEXITCODE -ne 0) { throw 'Current account removal checks failed.' }
+          dotnet run --project windows/CodexAccountSwitcher.Checks -c Release -- login-reauthorization ./windows/artifacts/installer-runtime/SwitcherHost.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Browser reauthorization checks failed.' }
       - name: Check guarded login, import and recovery
         timeout-minutes: 5
         shell: pwsh

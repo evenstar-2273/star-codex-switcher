@@ -44,6 +44,25 @@ public struct CredentialIdentity: CodexIdentityReading {
         return value
     }
 
+    // Saved token claims take precedence over registry labels during targeted renewal.
+    static func reauthorizationMatches(saved: Data, received: Data) throws -> Bool {
+        func fields(_ bytes: Data) throws -> (String?, String?, String?) {
+            let tokens = try JSONDecoder().decode(Credential.self, from: bytes).tokens
+            let id = try tokens?.id_token.map(decodeClaims)
+            let access = tokens?.access_token.flatMap { try? decodeClaims($0) }
+            return (nonempty(access?.auth?.chatgpt_user_id) ?? nonempty(access?.auth?.user_id) ?? nonempty(id?.auth?.chatgpt_user_id) ?? nonempty(id?.auth?.user_id) ?? nonempty(id?.sub),
+                    nonempty(access?.auth?.chatgpt_account_id) ?? nonempty(id?.auth?.chatgpt_account_id) ?? nonempty(tokens?.account_id),
+                    nonempty(access?.auth?.organization_id) ?? nonempty(id?.auth?.organization_id))
+        }
+        let old = try fields(saved), new = try fields(received)
+        guard let workspace = old.1, workspace == new.1 else { return false }
+        if let organization = old.2, let receivedOrganization = new.2, organization != receivedOrganization { return false }
+        if let user = old.0, let receivedUser = new.0 { return user == receivedUser }
+        // Legacy credentials without a user ID may renew unchanged identity, never change email.
+        guard let a = try decode(saved), let b = try decode(received) else { return false }
+        return a.matches(b)
+    }
+
     private static func decodeClaims(_ token: String) throws -> Claims {
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 3 else { throw CodexClientError.identityUnavailable }
@@ -58,14 +77,21 @@ public struct CredentialIdentity: CodexIdentityReading {
     private struct Tokens: Decodable {
         let account_id: String?
         let id_token: String?
+        let access_token: String?
     }
     private struct Claims: Decodable {
         let email: String?
+        let sub: String?
         let auth: Auth?
         enum CodingKeys: String, CodingKey {
-            case email
+            case email, sub
             case auth = "https://api.openai.com/auth"
         }
     }
-    private struct Auth: Decodable { let chatgpt_account_id: String? }
+    private struct Auth: Decodable {
+        let chatgpt_account_id: String?
+        let chatgpt_user_id: String?
+        let user_id: String?
+        let organization_id: String?
+    }
 }

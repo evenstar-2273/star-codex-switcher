@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.ComponentModel;
+using Microsoft.Win32.SafeHandles;
 
 namespace CodexAccountSwitcher.Core;
 
@@ -20,6 +22,12 @@ public sealed class DesktopController(Func<CancellationToken, Task<DesktopInstal
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetApplicationUserModelId(IntPtr process, ref uint length, StringBuilder? appUserModelId);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(uint access, bool inherit, int id);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(SafeProcessHandle process, uint flags, StringBuilder path, ref uint length);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetPackageFamilyName(SafeProcessHandle process, ref uint length, StringBuilder? family);
 
     public static async Task<DesktopInstallation> DiscoverAsync(string? explicitPath, CancellationToken ct = default)
     {
@@ -74,6 +82,8 @@ public sealed class DesktopController(Func<CancellationToken, Task<DesktopInstal
             }
             catch (System.ComponentModel.Win32Exception)
             {
+                // Recheck a racing exit instead of treating a vanished process as a blocker.
+                try { if (process.HasExited) { process.Dispose(); continue; } } catch (InvalidOperationException) { process.Dispose(); continue; }
                 process.Dispose();
                 foreach (var match in result) match.Dispose();
                 throw new IOException("Could not inspect a matching Desktop process. Close Codex Desktop manually before switching.");
@@ -86,22 +96,35 @@ public sealed class DesktopController(Func<CancellationToken, Task<DesktopInstal
 
     internal static bool MatchesInstallation(Process process, DesktopInstallation installation)
     {
-        // AUMIDs stay stable across Store package versions; a running app can retain its old install path after an update.
+        // Limited-query handles work even when MainModule/VM_READ is unavailable.
+        // AUMID and package family distinguish Store ChatGPT from the Codex executable of the same name.
+        using var handle = OpenProcess(0x1000, false, process.Id);
+        if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
         if (installation.AppUserModelId is { } expectedAppUserModelId &&
-            ReadApplicationUserModelId(process) is { } actualAppUserModelId)
+            ReadApplicationUserModelId(handle.DangerousGetHandle()) is { } actualAppUserModelId)
             return string.Equals(actualAppUserModelId, expectedAppUserModelId, StringComparison.OrdinalIgnoreCase);
-
-        return string.Equals(process.MainModule?.FileName, installation.Executable, StringComparison.OrdinalIgnoreCase);
+        uint familyLength = 0;
+        if (installation.AppUserModelId is { } expected && GetPackageFamilyName(handle, ref familyLength, null) == ErrorInsufficientBuffer) {
+            var family = new StringBuilder((int)familyLength);
+            if (GetPackageFamilyName(handle, ref familyLength, family) == ErrorSuccess && expected.Contains('!') && family.ToString().Contains('_'))
+                return !IsOtherPackage(expected, family.ToString());
+        }
+        uint length = 32768; var path = new StringBuilder((int)length);
+        if (!QueryFullProcessImageName(handle, 0, path, ref length)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return string.Equals(path.ToString(), installation.Executable, StringComparison.OrdinalIgnoreCase);
     }
+    internal static bool IsOtherPackage(string expectedAppId, string observedFamily) =>
+        expectedAppId.Contains('!') && observedFamily.Contains('_') &&
+        !string.Equals(expectedAppId.Split('!')[0], observedFamily, StringComparison.OrdinalIgnoreCase);
 
-    private static string? ReadApplicationUserModelId(Process process)
+    private static string? ReadApplicationUserModelId(IntPtr handle)
     {
         uint length = 0;
-        var result = GetApplicationUserModelId(process.Handle, ref length, null);
+        var result = GetApplicationUserModelId(handle, ref length, null);
         if (result != ErrorInsufficientBuffer || length == 0) return null;
 
         var value = new StringBuilder((int)length);
-        result = GetApplicationUserModelId(process.Handle, ref length, value);
+        result = GetApplicationUserModelId(handle, ref length, value);
         return result == ErrorSuccess ? value.ToString() : null;
     }
 
@@ -115,7 +138,12 @@ public sealed class DesktopController(Func<CancellationToken, Task<DesktopInstal
         var processes = FindDesktopProcesses(installation);
         try
         {
-            if (processes.Count == 0) return;
+            if (processes.Count == 0) {
+                // A second complete snapshot also covers startup/exit races before profile writes.
+                await Task.Delay(100, cancellationToken);
+                processes.AddRange(FindDesktopProcesses(installation));
+                if (processes.Count == 0) return;
+            }
             // Keep handles to descendants as well: Kill(true) and waiting for the root alone
             // do not guarantee its app-server children have exited before auth.json changes.
             var rootCount = processes.Count;
@@ -145,7 +173,13 @@ public sealed class DesktopController(Func<CancellationToken, Task<DesktopInstal
                 var remaining = FindDesktopProcesses(installation);
                 var count = remaining.Count;
                 foreach (var process in remaining) process.Dispose();
-                if (count == 0 && processes.All(process => process.HasExited)) return;
+                if (count == 0 && processes.All(process => process.HasExited)) {
+                    await Task.Delay(100, cancellationToken);
+                    var verified = FindDesktopProcesses(installation);
+                    var stopped = verified.Count == 0;
+                    foreach (var process in verified) process.Dispose();
+                    if (stopped) return;
+                }
                 if (stopwatch.Elapsed > exitTimeout)
                     throw new TimeoutException($"Codex Desktop or its child processes did not exit within {exitTimeout.TotalSeconds:g} seconds. Close them manually before switching; the account was not changed.");
                 await Task.Delay(200, cancellationToken);

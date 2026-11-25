@@ -37,12 +37,21 @@ public sealed class OfficialSubscriptionReader : ISubscriptionReader, IDisposabl
         var accounts = await GetAsync(CheckPath, "timezone_offset_min=" + offset.ToString(CultureInfo.InvariantCulture), credential, ct);
         var selected = ParseAccountCheck(accounts, credential.AccountID, credential.OrganizationID, now());
         if (selected.IsConfirmedFree(now())) return selected with { ActiveUntil = null };
-        if (selected.ActiveUntil > now()) return selected;
+        var hasActiveEntitlement = selected.ActiveUntil > now();
         var accountId = selected.AccountID ?? credential.AccountID;
-        var subscriptions = await GetAsync(SubscriptionPath, "account_id=" + Uri.EscapeDataString(accountId), credential, ct);
-        var current = ParseSubscriptions(subscriptions, accountId);
-        // An empty fallback does not certify the older expired entitlement as the current expiry.
-        return current with { PlanType = current.PlanType ?? selected.PlanType };
+        try {
+            var subscriptions = await GetAsync(SubscriptionPath, "account_id=" + Uri.EscapeDataString(accountId), credential, ct);
+            var current = ParseSubscriptions(subscriptions, accountId);
+            // Workspace billing is authoritative even when an entitlement extends beyond it.
+            return current with {
+                ActiveUntil = current.ActiveUntil ?? (hasActiveEntitlement ? selected.ActiveUntil : null),
+                Source = current.ActiveUntil == null && hasActiveEntitlement ? selected.Source : current.Source,
+                PlanType = hasActiveEntitlement ? selected.PlanType : current.PlanType ?? selected.PlanType
+            };
+        } catch (SubscriptionReadException) when (hasActiveEntitlement) {
+            // This is the fresh account-check result, never an old credential snapshot.
+            return selected;
+        }
     }
 
     private async Task<string> GetAsync(string path, string query, LoginCredential credential, CancellationToken ct)

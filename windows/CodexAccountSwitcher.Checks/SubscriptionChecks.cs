@@ -87,7 +87,19 @@ internal static class SubscriptionChecks
         var futureCalls = 0;
         using (var reader = new OfficialSubscriptionReader(new Handler(_ => { futureCalls++; return Response(200, Accounts("2026-12-01T08:26:00Z")); }), () => Now)) {
             var lookup = await reader.ReadAsync(credential, default);
-            Require(futureCalls == 1 && lookup.Source == "accounts_check", "A valid future entitlement needs no second endpoint.");
+            Require(futureCalls == 2 && lookup.ActiveUntil == DateTimeOffset.Parse("2026-12-01T08:26:00Z"), "Future entitlements still query workspace billing; an empty billing result retains the fresh entitlement.");
+        }
+        foreach (var expiry in new[] { Now.AddHours(-2), Now.AddDays(45) }) {
+            using var reader = new OfficialSubscriptionReader(new Handler(request => Response(200,
+                request.RequestUri!.AbsolutePath.Contains("accounts/check") ? Accounts(Now.AddHours(6).ToString("O")) :
+                JsonSerializer.Serialize(new { active_until = expiry.ToString("O") }))), () => Now);
+            var lookup = await reader.ReadAsync(credential, default);
+            Require(lookup.ActiveUntil == expiry && lookup.Source == "subscriptions", "Workspace billing overrides both later entitlement and earlier renewal date without inventing an offset.");
+        }
+        using (var reader = new OfficialSubscriptionReader(new Handler(request => request.RequestUri!.AbsolutePath.Contains("accounts/check")
+            ? Response(200, Accounts(Now.AddHours(6).ToString("O"))) : Response(500, "SECRET")), () => Now)) {
+            var lookup = await reader.ReadAsync(credential, default);
+            Require(lookup.Source == "accounts_check" && lookup.ActiveUntil == Now.AddHours(6), "Billing failure retains only the freshly verified, still-valid entitlement.");
         }
         foreach (var firstExpiry in new[] { "", "invalid-date", "2026-11-01T08:26:00Z" }) {
             var count = 0;
@@ -260,14 +272,14 @@ internal static class SubscriptionChecks
         }), () => Now);
         var credential = Credential(null, null, boundary.ToString("O"));
         var result = await reader.ReadAsync(credential, default);
-        Require(calls == 1 && result.ActiveUntil == renewed && result.IsVerified,
+        Require(calls == 2 && result.ActiveUntil == renewed && result.IsVerified,
             "A renewal is fetched before the old login subscription expires.");
         Require(result.ActiveUntil?.ToOffset(TimeSpan.FromHours(8)).Hour == 15,
             "Live subscription timestamps preserve their exact timezone conversion.");
         Require(credential.SubscriptionActiveUntil == boundary, "Reading renewal never mutates login credentials.");
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         try { await reader.ReadAsync(credential, cancelled.Token); throw new Exception("Cancellation ignored."); }
-        catch (OperationCanceledException) { Require(calls == 1, "Cancellation performs no HTTP request."); }
+        catch (OperationCanceledException) { Require(calls == 2, "Cancellation performs no HTTP request."); }
         var snapshot = new SubscriptionSnapshot(renewed, Now, "accounts_check", true);
         Require(!GuardedAccountClient.ShouldRefreshSubscription("verified", snapshot, Now, Now.AddMinutes(29), false), "Background lookups respect the existing 30 minute cache.");
         Require(GuardedAccountClient.ShouldRefreshSubscription("verified", snapshot, Now, Now.AddMinutes(30), false), "The cache permits renewal checks while the previous period is still valid.");
@@ -305,7 +317,7 @@ internal static class SubscriptionChecks
             mode = 1;
             await client.CommandAsync("refresh", id);
             var fresh = client.State.Accounts[0].Subscription!;
-            Require(httpCalls == 2 && fresh.IsVerified && fresh.ActiveUntil == renewed,
+            Require(httpCalls == 3 && fresh.IsVerified && fresh.ActiveUntil == renewed,
                 "Manual refresh discovers renewal before expiry and replaces the old date.");
             mode = 0;
             await client.CommandAsync("refresh", id);

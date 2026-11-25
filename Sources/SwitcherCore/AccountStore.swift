@@ -254,7 +254,8 @@ public actor AccountStore: AccountStoring {
             guard let target = current.accounts.first(where: { $0.id == replacingAccountID }) else {
                 throw AccountStoreError.profileNotFound
             }
-            guard identity.matches(target) else {
+            let saved = try readChecked(profileHome(id: target.id).appending(path: "auth.json"))
+            guard try CredentialIdentity.reauthorizationMatches(saved: saved, received: readChecked(authURL)) else {
                 throw CodexClientError.authorizedAccountMismatch
             }
         }
@@ -263,10 +264,17 @@ public actor AccountStore: AccountStoring {
         }) {
             // A successful browser authorization renews the same saved account in place.
             let bytes = try readChecked(authURL)
-            guard let verified = try CredentialIdentity.decode(bytes), verified.matches(profile), verified.matches(existing) else {
+            let destination = profileHome(id: existing.id).appending(path: "auth.json")
+            let previous = try readChecked(destination)
+            guard let verified = try CredentialIdentity.decode(bytes), verified.matches(profile),
+                  try CredentialIdentity.reauthorizationMatches(saved: previous, received: bytes) else {
                 throw CodexClientError.identityUnavailable
             }
-            let destination = profileHome(id: existing.id).appending(path: "auth.json")
+            if let email = profile.email, email.caseInsensitiveCompare(existing.email ?? "") != .orderedSame,
+               current.accounts.contains(where: { $0.id != existing.id && $0.email?.caseInsensitiveCompare(email) == .orderedSame }) {
+                throw NSError(domain: "CodexAccountSwitcher.Reauthorization", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "重新授权的邮箱已被另一个账号使用，已保留所有原账号，请先处理冲突记录。"])
+            }
             try checkPath(destination)
             let live = activeHomeURL.appending(path: "auth.json")
             if fileManager.fileExists(atPath: live.path) {
@@ -293,6 +301,15 @@ public actor AccountStore: AccountStoring {
             }
             try Task.checkCancellation()
             try secureAtomicWrite(bytes, to: destination)
+            if let index = current.accounts.firstIndex(where: { $0.id == existing.id }) {
+                let oldDefault = AccountIdentity(accountID: existing.accountID, email: existing.email).suggestedDisplayName
+                let display = existing.displayName == oldDefault || existing.displayName == existing.email
+                    ? identity.suggestedDisplayName : existing.displayName
+                current.accounts[index] = AccountProfile(id: existing.id, displayName: display, email: profile.email,
+                    accountID: profile.accountID, createdAt: existing.createdAt, lastUsedAt: existing.lastUsedAt)
+                do { try saveRegistry(current) }
+                catch { try secureAtomicWrite(previous, to: destination); throw error }
+            }
             return
         }
         current.removedAccountIdentities.removeAll { identity.matches($0) }

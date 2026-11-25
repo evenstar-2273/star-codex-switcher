@@ -11,3 +11,5 @@ The packaging script embeds these notices alongside the Swift host and runtime D
 - WPF runtime 10.0.12: `Microsoft.WindowsDesktop.App.Runtime.win-x64` NuGet package, `LICENSE`.
 
 The DLLs come from the signed official Swift runtime distribution. Microsoft Visual C++ runtime DLLs included in that distribution retain Microsoft's licensing terms. Update these notices when updating the packaged runtime versions.
+
+- ZstdSharp.Port 0.8.7: `oleg-st/ZstdSharp`, commit `0ee6121aaa173b42e68d3c6c8816a68e910e0557`, MIT license. Bundled managed streaming decompression for compressed local histories.

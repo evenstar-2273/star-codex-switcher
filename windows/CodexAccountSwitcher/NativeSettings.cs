@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using System.Threading;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using System.Linq;
 using Microsoft.Win32;
 
 namespace CodexAccountSwitcher;
@@ -46,6 +47,21 @@ public sealed class NativeSettings
         }
     }
     public event Action? ThemePreferenceChanged;
+    public Guid[] AccountOrder {
+        get {
+            using var key = Registry.CurrentUser.OpenSubKey(settingsKey);
+            return (key?.GetValue("AccountOrder") as string[] ?? []).Select(value => Guid.TryParse(value, out var id) ? id : Guid.Empty)
+                .Where(id => id != Guid.Empty).Distinct().ToArray();
+        }
+        set {
+            using var key = Registry.CurrentUser.CreateSubKey(settingsKey);
+            key.SetValue("AccountOrder", value.Where(id => id != Guid.Empty).Distinct().Select(id => id.ToString("D")).ToArray(), RegistryValueKind.MultiString);
+        }
+    }
+    public static Guid[] ReconcileOrder(IEnumerable<Guid> saved, IEnumerable<Guid> current) {
+        var available = current.Distinct().ToArray(); var known = available.ToHashSet();
+        return saved.Where(known.Contains).Concat(available).Distinct().ToArray();
+    }
     public static string NormalizeAccentPreference(string? value) => value is "blue" or "teal" or "orange" ? value : "purple";
     public string AccentPreference {
         get { using var key = Registry.CurrentUser.OpenSubKey(settingsKey); return NormalizeAccentPreference(key?.GetValue("AccentPreference") as string); }

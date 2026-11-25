@@ -34,6 +34,7 @@ public partial class App : Application
     private RegisteredWaitHandle? installerListener;
     private Forms.NotifyIcon? tray;
     private Forms.ContextMenuStrip? trayMenu;
+    private bool trayRefreshPending;
     private Icon? icon;
     private string? trayIconVariant;
     private System.Drawing.Size trayIconSize;
@@ -135,6 +136,9 @@ public partial class App : Application
             quitItem.Click += (_, _) => _ = QuitAsync();
             trayMenu.Items.Add(openItem); trayMenu.Items.Add(new Forms.ToolStripSeparator()); trayMenu.Items.Add(quitItem);
             trayMenu.Opening += (_, _) => { quitItem.Text = WindowsLocalization.IsChinese(client.State.Settings.Language) ? "退出应用" : "Quit"; quitItem.Enabled = !window.IsBusy; };
+            trayMenu.Closed += (_, _) => {
+                if (trayRefreshPending && !exiting) Dispatcher.BeginInvoke(new Action(RefreshTray));
+            };
             tray.ContextMenuStrip = trayMenu;
             tray.MouseClick += (_, args) => {
                 if (args.Button == Forms.MouseButtons.Left) { ApplyTheme(); window.OpenWindow(); }
@@ -163,6 +167,10 @@ public partial class App : Application
 
     private void RefreshTray()
     {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(RefreshTray)); return; }
+        if (exiting) return;
+        if (trayMenu?.Visible == true) { trayRefreshPending = true; return; }
+        trayRefreshPending = false;
         if (client == null || tray == null) return;
         RefreshTrayIcon();
         var active = client.State.Accounts.FirstOrDefault(row => row.Profile.Id == client.State.ActiveAccountID);
@@ -182,6 +190,7 @@ public partial class App : Application
     }
     private void RefreshTrayIcon()
     {
+        if (trayMenu?.Visible == true) { trayRefreshPending = true; return; }
         if (tray == null) return;
         using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
         // Taskbar appearance can differ from the application's light/dark theme.

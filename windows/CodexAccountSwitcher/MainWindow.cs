@@ -40,6 +40,7 @@ public sealed class MainWindow : Window
     private AdaptiveCardGrid? accountGrid;
     private RefreshRotation? refreshRotation;
     private readonly System.Collections.Generic.Dictionary<Guid, RefreshRotation> accountRefreshes = new();
+    private readonly Dictionary<Guid, (DateTimeOffset Time, bool Failed)> refreshResults = new();
     private bool quietRefreshPending;
     public bool IsRefreshing => refreshRotation != null || accountRefreshes.Count != 0;
     private RefreshRotation? resetRotation;
@@ -181,13 +182,20 @@ public sealed class MainWindow : Window
             var rotation = new RefreshRotation(id);
             if (id is { } startId) accountRefreshes[startId] = rotation; else refreshRotation = rotation;
             localError = null;
+            var requestedIds = id is { } single ? new[] { single } : State.Accounts.Select(row => row.Profile.Id).ToArray();
+            var requestFailed = false;
+            foreach (var requested in requestedIds) refreshResults.Remove(requested);
             Render();
             try { await client.CommandAsync(command, id, value, language); }
-            catch (Exception ex) { localError = ex.Message; }
+            catch (Exception ex) { requestFailed = true; localError = ex.Message; }
             finally {
                 rotation.Dispose();
                 if (id is { } endId) accountRefreshes.Remove(endId);
                 else if (ReferenceEquals(refreshRotation, rotation)) refreshRotation = null;
+                foreach (var requested in requestedIds) {
+                    var row = State.Accounts.FirstOrDefault(account => account.Profile.Id == requested);
+                    if (row != null) refreshResults[requested] = (now(), requestFailed || row.UsageError != null || row.SubscriptionError != null || row.Usage == null);
+                }
                 Render();
             }
             return;
@@ -287,6 +295,9 @@ public sealed class MainWindow : Window
             var title = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             title.Children.Add(Text(T("accounts"), 28, bold: true));
             var count = Text(L($"{State.Accounts.Length} 个账号", $"{State.Accounts.Length} accounts"), 16, muted: true); count.Margin = new Thickness(20, 0, 0, 0); title.Children.Add(count);
+            var sort = Button("", () => { new AccountOrderWindow(State.Accounts, native, Chinese) { Owner = this }.ShowDialog(); Render(); }, "\uE8CB");
+            sort.Margin = new Thickness(10, 0, 0, 0); sort.ToolTip = L("账号排序", "Account order"); sort.IsEnabled &= State.Accounts.Length > 1;
+            AutomationProperties.SetName(sort, L("账号排序", "Account order")); title.Children.Add(sort);
             var commands = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right };
             var add = Button(T(State.IsAddingAccount ? "cancel_add_account" : "add_account"), OpenAddAccount, State.IsAddingAccount ? "\uE711" : "\uE710"); Primary(add); commands.Children.Add(add);
             if (client is IAccountImporter) {
@@ -354,7 +365,8 @@ public sealed class MainWindow : Window
         var list = new AdaptiveCardGrid { Margin = new Thickness(-8, -8, -8, 0) };
         accountGrid = list;
         var activeAccountId = State.ActiveAccountID;
-        foreach (var row in State.Accounts.OrderByDescending(row => row.Profile.Id == activeAccountId)) list.Children.Add(AccountItem(row));
+        var order = NativeSettings.ReconcileOrder(native.AccountOrder, State.Accounts.Select(row => row.Profile.Id));
+        foreach (var row in State.Accounts.OrderByDescending(row => row.Profile.Id == activeAccountId).ThenBy(row => Array.IndexOf(order, row.Profile.Id))) list.Children.Add(AccountItem(row));
         if (State.Accounts.Length == 0) {
             var empty = Text(T("no_accounts"), 17, muted: true); empty.Margin = new Thickness(24, 54, 24, 54); empty.TextWrapping = TextWrapping.Wrap; body.Children.Add(Box(empty));
         } else body.Children.Add(list);
@@ -430,6 +442,11 @@ public sealed class MainWindow : Window
         card.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         card.Children.Add(AccountHeader(row, active));
         var quotas = new StackPanel { Margin = new Thickness(0, 14, 0, 8), VerticalAlignment = VerticalAlignment.Center };
+        if (refreshResults.TryGetValue(row.Profile.Id, out var result)) {
+            var feedback = Text((result.Failed ? L("刷新未全部完成", "Refresh incomplete") : L("刷新完成", "Refreshed")) + " · " + result.Time.ToString("HH:mm:ss"), 12);
+            feedback.SetResourceReference(TextBlock.ForegroundProperty, result.Failed ? "Warning" : "Success");
+            feedback.Margin = new Thickness(0, 0, 0, 5); quotas.Children.Add(feedback);
+        }
         var cachedQuota = !string.IsNullOrWhiteSpace(row.UsageError);
         if (row.Usage is { } usage) {
             AddQuotaLines(quotas, usage, cachedQuota);

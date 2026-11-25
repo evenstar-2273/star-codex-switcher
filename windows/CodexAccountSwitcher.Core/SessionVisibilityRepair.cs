@@ -10,19 +10,20 @@ namespace CodexAccountSwitcher.Core;
 public sealed record SwitchProgress(int Percent, string Message, string? Notice = null);
 public interface ISwitchProgressSource { event Action<SwitchProgress>? SwitchProgressChanged; }
 
-// Local, bounded launch maintenance. Apply only after Desktop stops and target
+// Local launch maintenance. Apply only after Desktop stops and target
 // credentials are committed. Keep rollback information in memory until launch succeeds.
 internal sealed class SessionVisibilityRepair : IDisposable
 {
     private readonly string home;
     private readonly List<DatabaseEdit> edits = [];
     private readonly List<TimeEdit> times = [];
+    private readonly Dictionary<string, string?> rolloutPaths = new(StringComparer.OrdinalIgnoreCase);
     private string StatePath => Path.Combine(home, ".codex-global-state.json");
     private byte[]? beforeState, afterState;
     private bool stateWritten;
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private readonly CancellationToken cancellation;
-    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan Budget = Timeout.InfiniteTimeSpan;
     private sealed record RowEdit(string Id, Dictionary<string, string?> Before, Dictionary<string, string?> After);
     private sealed class DatabaseEdit(string path, ProfileSqlite db) {
         internal readonly string Path = path;
@@ -36,7 +37,7 @@ internal sealed class SessionVisibilityRepair : IDisposable
     internal string? ProjectNotice { get; private set; }
     internal int CorrectedProjectAliases { get; private set; }
     internal SessionVisibilityRepair(string home, CancellationToken cancellation) { this.home = Path.GetFullPath(home); this.cancellation = cancellation; }
-    private void Check() { cancellation.ThrowIfCancellationRequested(); if (clock.Elapsed > Budget) throw new IOException("项目与会话检查超时，已停止本次修复，请稍后重试。"); }
+    private void Check() => cancellation.ThrowIfCancellationRequested();
     internal void Apply(LoginCredential target, Action<SwitchProgress>? report)
     {
         try {
@@ -64,7 +65,6 @@ internal sealed class SessionVisibilityRepair : IDisposable
                     ProjectNotice = "部分重复项目入口缺少一致的导入记录，已保留原项目与会话关联，未自动处理。";
                 if (!JsonNode.DeepEquals(before, after)) {
                     afterState = JsonSerializer.SerializeToUtf8Bytes(after);
-                    if (afterState.Length > 20_000_000) throw new IOException("项目状态文件过大，已停止本次修复。");
                 }
             }
             report?.Invoke(new(72, "正在检查并修复会话显示…", ProjectNotice));
@@ -91,7 +91,6 @@ internal sealed class SessionVisibilityRepair : IDisposable
     {
         SecureFiles.RejectLinks(StatePath);
         if (!File.Exists(StatePath)) return null;
-        if (new FileInfo(StatePath).Length > 20_000_000) throw new IOException("项目状态文件过大，已保留原文件。");
         beforeState = File.ReadAllBytes(StatePath);
         var content = beforeState.AsSpan(); if (content.StartsWith(new byte[] { 239, 187, 191 })) content = content[3..];
         return JsonNode.Parse(content) as JsonObject ?? throw new IOException("项目状态文件为空或格式损坏，已保留原文件并停止切换。");
@@ -123,11 +122,10 @@ internal sealed class SessionVisibilityRepair : IDisposable
                 ? db.Query("SELECT key,project_id FROM project_idempotency_keys").Where(r => r["key"] != null && r["project_id"] != null)
                     .GroupBy(r => r["project_id"]!).ToDictionary(g => g.Key, g => g.Select(r => r["key"]!).ToArray())
                 : new Dictionary<string, string[]>();
-            foreach (var row in db.Query("SELECT id," + (cols.Contains("metadata") ? "metadata" : "'{}' AS metadata") + " FROM projects ORDER BY id LIMIT 20001")) {
+            foreach (var row in db.Query("SELECT id," + (cols.Contains("metadata") ? "metadata" : "'{}' AS metadata") + " FROM projects ORDER BY id")) {
                 Check();
                 var metadata = JsonNode.Parse(row["metadata"] ?? "{}") as JsonObject ?? throw new IOException("项目元数据格式损坏，已停止修复。");
-                var paths = db.Query("SELECT path FROM project_roots WHERE project_id=?1 ORDER BY path LIMIT 33", row["id"]).Select(r => r["path"]!).ToArray();
-                if (paths.Length > 32) throw new IOException("项目目录记录过多，已停止本次快速修复。");
+                var paths = db.Query("SELECT path FROM project_roots WHERE project_id=?1 ORDER BY path", row["id"]).Select(r => r["path"]!).ToArray();
                 projects.Add(new(row["id"]!, metadata, paths, imports.GetValueOrDefault(row["id"]!, [])));
             }
             var tc = db.Columns("threads");
@@ -136,23 +134,11 @@ internal sealed class SessionVisibilityRepair : IDisposable
                 throw new IOException("项目会话关联结构暂不兼容，已保留原数据。");
             var fields = new[] { "id", "cwd", "project_id", "source", "thread_source", "has_user_event", "first_user_message", "thread_section_id" };
             var select = "SELECT " + string.Join(",", fields.Select(key => tc.Contains(key) ? key : "NULL AS " + key)) + " FROM threads";
-            var rows = db.Query(select + " ORDER BY id LIMIT 2049");
-            if (rows.Count > 2048) {
-                // On large histories, restore only memberships used by current/target UI.
-                var ids = ReferencedThreads(state).Take(2048).ToArray(); rows.Clear();
-                foreach (var id in ids) { Check(); rows.AddRange(db.Query(select + " WHERE id=?1", id)); }
-            }
+            var rows = db.Query(select + " ORDER BY id");
             return (projects, rows.Select(row => new ProjectAccountState.Thread(row["id"]!, row["project_id"], row["cwd"],
                 !IsChild(row["source"], row["thread_source"]) && (row["has_user_event"] is not (null or "0") || !string.IsNullOrEmpty(row["first_user_message"])), row["thread_section_id"])).ToList());
         }
         return ([], []);
-    }
-    private static IEnumerable<string> ReferencedThreads(JsonObject state)
-    {
-        var sources = new[] { state }.Concat(ProjectAccountState.Object(state[ProjectAccountState.Scopes]?["inactive"]).Select(pair => ProjectAccountState.Object(pair.Value?["globals"])));
-        return sources.SelectMany(source => ProjectAccountState.Object(source[ProjectAccountState.Assign]).Select(pair => pair.Key)
-            .Concat((source["pinned-thread-ids"] as JsonArray ?? []).Select(ProjectAccountState.String).OfType<string>())
-            .Concat(ProjectAccountState.Object(source["sidebar-project-thread-orders"]).SelectMany(pair => (pair.Value?["threadIds"] as JsonArray ?? []).Select(ProjectAccountState.String).OfType<string>()))).Distinct();
     }
     private static bool IsChild(string? source, string? detail) => (source?.Contains("subagent", StringComparison.OrdinalIgnoreCase) ?? false) ||
         string.Equals(source, "guardian", StringComparison.OrdinalIgnoreCase) || string.Equals(detail, "subagent", StringComparison.OrdinalIgnoreCase) || string.Equals(detail, "guardian", StringComparison.OrdinalIgnoreCase);
@@ -178,6 +164,9 @@ internal sealed class SessionVisibilityRepair : IDisposable
         var wanted = new[] { "id", "model_provider", "has_user_event", "first_user_message", "thread_source", "preview", "cwd", "rollout_path", "updated_at", "updated_at_ms", "source" }.Where(columns.Contains).ToArray();
         foreach (var row in edit.Db.Query("SELECT " + string.Join(",", wanted) + " FROM threads WHERE " + string.Join(" AND ", visible), columns.Contains("model_provider") ? [provider] : [])) {
             Check(); if (IsChild(row.GetValueOrDefault("source"), row.GetValueOrDefault("thread_source"))) continue;
+            // A stale database row must not hide healthy conversations behind a failed repair.
+            // Compressed siblings are valid history; never unpack or rewrite their contents.
+            if (columns.Contains("rollout_path") && ResolveRollout(row.GetValueOrDefault("rollout_path")) == null) continue;
             var after = new Dictionary<string, string?>();
             if (columns.Contains("model_provider") && row["model_provider"] != provider) after["model_provider"] = provider;
             if (!string.IsNullOrEmpty(row.GetValueOrDefault("first_user_message"))) {
@@ -196,13 +185,13 @@ internal sealed class SessionVisibilityRepair : IDisposable
     }
     private void PlanTime(Dictionary<string, string?> row)
     {
-        var raw = row.GetValueOrDefault("rollout_path"); if (string.IsNullOrEmpty(raw)) return;
-        var path = Path.GetFullPath(raw, home);
-        if (!path.StartsWith(Path.TrimEndingDirectorySeparator(home) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)) return;
-        SecureFiles.RejectLinks(path); if (!File.Exists(path)) return;
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var path = ResolveRollout(row.GetValueOrDefault("rollout_path")); if (path == null) return;
+        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using Stream stream = path.EndsWith(".zst", StringComparison.OrdinalIgnoreCase) ? new ZstdSharp.DecompressionStream(file) : file;
         var header = new List<byte>(); int b;
-        while (header.Count < 65536 && (b = stream.ReadByte()) >= 0 && b != 10) header.Add((byte)b);
+        try {
+            while (header.Count < 65536 && (b = stream.ReadByte()) >= 0 && b != 10) { Check(); header.Add((byte)b); }
+        } catch (ZstdSharp.ZstdException) { return; }
         if (header.Count >= 65536) return;
         JsonObject? meta;
         try { meta = JsonNode.Parse(header.ToArray()) as JsonObject; } catch (JsonException) { return; }
@@ -217,6 +206,24 @@ internal sealed class SessionVisibilityRepair : IDisposable
         var info = new FileInfo(path);
         if (desired.Year < 2000 || Math.Abs((info.LastWriteTimeUtc - desired).TotalMilliseconds) < 1 || times.Any(item => item.Path == path)) return;
         times.Add(new(path, info.Length, info.LastWriteTimeUtc, desired));
+    }
+    private string? ResolveRollout(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        if (rolloutPaths.TryGetValue(raw, out var cached)) return cached;
+        return rolloutPaths[raw] = ResolveRolloutUncached(raw);
+    }
+    private string? ResolveRolloutUncached(string raw)
+    {
+        string path;
+        try { path = Path.GetFullPath(raw, home); } catch (Exception ex) when (ex is ArgumentException or NotSupportedException) { return null; }
+        if (!path.StartsWith(Path.TrimEndingDirectorySeparator(home) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+            !(path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".jsonl.zst", StringComparison.OrdinalIgnoreCase))) return null;
+        SecureFiles.RejectLinks(path);
+        if (File.Exists(path)) return path;
+        if (!path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)) return null;
+        path += ".zst"; SecureFiles.RejectLinks(path);
+        return File.Exists(path) ? path : null;
     }
     private static void WriteRow(ProfileSqlite db, string id, Dictionary<string, string?> values, Dictionary<string, string?> expected)
     {

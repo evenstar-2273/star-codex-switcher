@@ -60,6 +60,8 @@ internal static class RefreshResetChecks
             ResetInteractions(window, client, native, output);
             SilentAndAccountActions(app, window, client, native, output);
             LocalAccountDialog(window, output);
+            AccountOrdering(app, window, client, native, key, output);
+            TrayStability(app);
             File.WriteAllText(Path.Combine(output, "refresh-reset-result.txt"), $"PASS: {assertions} refresh/reset presentation assertions; simulated requests only.");
             Console.WriteLine($"PASS: {assertions} refresh/reset assertions; actual WPF rotation, refresh scope, pending deduplication, success/error cleanup, scroll preservation, three expiry colors, live countdowns and confirmation consistency.");
         } finally {
@@ -168,6 +170,7 @@ internal static class RefreshResetChecks
         scroll.ScrollToVerticalOffset(listOffset); Pump(40);
         client.Release(); PumpUntil(() => !window.IsBusy && !window.IsRefreshing); Pump(30);
         Check(!rotation.HasAnimatedProperties && RefreshButtons(window).All(button => !Icon(button).RenderTransform.HasAnimatedProperties && button.IsEnabled), "Successful completion removes the animation clocks and restores the refresh controls.");
+        Check(Cards(window).All(card => All<TextBlock>(card).Any(text => text.Text.StartsWith("刷新完成 · "))), "Each requested card shows its own completed refresh time.");
         Check(Math.Abs(scroll.VerticalOffset - listOffset) < 1, "Successful completion retains the account list position.");
 
         var target = client.State.Accounts[1].Profile.Id;
@@ -186,6 +189,8 @@ internal static class RefreshResetChecks
         client.Release(new IOException("模拟刷新失败，保留已有数据。")); PumpUntil(() => !window.IsBusy && !window.IsRefreshing); Pump(40);
         Check(!single.HasAnimatedProperties && RefreshButtons(window).All(button => !Icon(button).RenderTransform.HasAnimatedProperties && button.IsEnabled), "A failed request also stops spinning and re-enables every refresh entry point.");
         Check(All<TextBlock>(window).Any(text => text.Text.Contains("模拟刷新失败")), "A failed refresh remains visible as an error rather than looking like a successful refresh.");
+        Check(All<TextBlock>(Cards(window)[1]).Any(text => text.Text.StartsWith("刷新未全部完成 · ")) &&
+            All<TextBlock>(Cards(window)[0]).Any(text => text.Text.StartsWith("刷新完成 · ")), "A failed card refresh does not overwrite the unrelated card's success feedback.");
         Check(Math.Abs(scroll.VerticalOffset - listOffset) < 1, "An error render preserves list scroll position.");
 
         Click(Button(window, "刷新")); Pump(30); var settingsRotation = ActiveRotation(Button(window, "刷新"));
@@ -203,6 +208,39 @@ internal static class RefreshResetChecks
         Check(client.Calls.Count == 5, "Refresh can be retried normally after an earlier failure.");
     }
     private static FrameworkElement ResetLine(DependencyObject owner) => All<FrameworkElement>(owner).Single(element => Name(element) == "重置卡到期");
+    private static void AccountOrdering(App app, MainWindow window, Client client, NativeSettings native, string key, string output) {
+        var ids = client.State.Accounts.Select(row => row.Profile.Id).ToArray();
+        foreach (var dark in new[] { false, true }) {
+            native.ThemePreference = dark ? "dark" : "light";
+            var dialog = new AccountOrderWindow(client.State.Accounts, native, true) { Owner = window };
+            dialog.Show(); Pump(50); dialog.Move(ids[^1], 0); Pump(30);
+            Check(new NativeSettings(key).AccountOrder.First() == ids[^1], "Custom order is persisted immediately and survives a new settings instance.");
+            Check(NativeSettings.ReconcileOrder(native.AccountOrder, []).Length == 0 && native.AccountOrder.First() == ids[^1], "An empty startup account snapshot never erases persisted ordering.");
+            Check(NativeSettings.ReconcileOrder(native.AccountOrder, ids.Append(Guid.Empty)).Last() == Guid.Empty, "New accounts append after saved positions.");
+            Capture(dialog, Path.Combine(output, $"account-order-{(dark ? "dark" : "light")}.png")); dialog.Close();
+            window.Navigate("accounts"); Pump(40);
+            var expected = NativeSettings.ReconcileOrder(native.AccountOrder, ids).OrderByDescending(id => id == client.State.ActiveAccountID).ToArray();
+            Check(Cards(window).Select(card => All<Button>(card).Select(Name).First(name => client.State.Accounts.Any(row => row.Profile.Email == name)))
+                .SequenceEqual(expected.Select(id => client.State.Accounts.Single(row => row.Profile.Id == id).Profile.Email)), "The current account stays first, followed by persisted custom order.");
+        }
+    }
+    private static void TrayStability(App app) {
+        var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var field = typeof(App).GetField("trayMenu", flags)!;
+        using var menu = new System.Windows.Forms.ContextMenuStrip();
+        var clicks = 0; var item = new System.Windows.Forms.ToolStripMenuItem("测试菜单"); item.Click += (_, _) => clicks++;
+        menu.Items.Add(item); field.SetValue(app, menu);
+        try {
+            menu.Show(30, 30); Pump(30);
+            var refresh = typeof(App).GetMethod("RefreshTray", flags)!;
+            for (var i = 0; i < 100; i++) refresh.Invoke(app, null);
+            Check(menu.Visible && ReferenceEquals(menu.Items[0], item), "Background tray refreshes do not replace or close an open menu.");
+            Check((bool)typeof(App).GetField("trayRefreshPending", flags)!.GetValue(app)!, "Open-menu refreshes are coalesced into a pending update.");
+            item.PerformClick(); Check(clicks == 1, "The retained tray item keeps its handler after repeated refreshes.");
+            menu.Close(); refresh.Invoke(app, null);
+            Check(!(bool)typeof(App).GetField("trayRefreshPending", flags)!.GetValue(app)!, "Pending tray refresh clears after the menu closes.");
+        } finally { menu.Close(); field.SetValue(app, null); }
+    }
     private static void SilentAndAccountActions(App app, MainWindow window, Client client, NativeSettings native, string output)
     {
         client.Publish(client.State with { Error = null }); window.Navigate("accounts"); window.Height = 600; Pump(40);

@@ -176,6 +176,31 @@ internal static class SessionVisibilityChecks
                 db.Query("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<25000) INSERT INTO threads SELECT CAST(x AS TEXT),'openai','hello','cli','user',1,'hello',0,'missing.jsonl','D:\\Work' FROM n");
             }
             using (var repair = new SessionVisibilityRepair(empty, default)) { repair.Apply(b, null); Check(repair.RepairedThreads == 0, "Large already-correct histories do not hit the changed-row cap or get rewritten"); }
+            using (var db = Open(largeDb)) db.Query("UPDATE threads SET model_provider='old-provider'");
+            using (var repair = new SessionVisibilityRepair(empty, default)) { repair.Apply(b, null); Check(repair.RepairedThreads == 0, "25,000 missing rollouts are skipped without hiding other histories or aborting on a row cap"); }
+            var compressed = Path.Combine(empty, "compressed.jsonl.zst");
+            var compressedContent = Encoding.UTF8.GetBytes("{\"type\":\"session_meta\",\"payload\":{\"id\":\"compressed\",\"source\":\"cli\"}}\n{\"message\":\"PRESERVE\"}\n");
+            using (var compressor = new ZstdSharp.Compressor()) File.WriteAllBytes(compressed, compressor.Wrap(compressedContent).ToArray());
+            var compressedBefore = File.ReadAllBytes(compressed);
+            var history = Path.Combine(empty, "history_9.sqlite"); File.WriteAllBytes(history, []);
+            using (var db = Open(history)) {
+                db.Query("CREATE TABLE _sqlx_migrations(version INTEGER,success INTEGER)"); db.Query("INSERT INTO _sqlx_migrations VALUES(9,1)");
+                db.Query("CREATE TABLE thread_realtime_items(thread_id TEXT,item_json TEXT,rollout_ordinal INTEGER,item_id TEXT)");
+                db.Query("CREATE INDEX idx_thread_realtime_observed ON thread_realtime_items(thread_id,json_extract(item_json,'$.observed_at_ms'),rollout_ordinal,item_id) WHERE json_extract(item_json,'$.observed_at_ms') IS NOT NULL");
+                db.Query("INSERT INTO thread_realtime_items VALUES('compressed','{\"observed_at_ms\":1}',1,'original-message')");
+            }
+            var historyBefore = File.ReadAllBytes(history);
+            using (var db = Open(largeDb)) {
+                db.Query("ALTER TABLE threads ADD COLUMN updated_at INTEGER");
+                db.Query("INSERT INTO threads VALUES('compressed','old-provider','hello','cli','user',1,'hello',0,'compressed.jsonl','D:\\Work',1730000000)");
+                db.Query("INSERT INTO threads VALUES('direct','old-provider','hello','cli','user',1,'hello',0,'compressed.jsonl.zst','D:\\Work',1730000000)");
+            }
+            using (var repair = new SessionVisibilityRepair(empty, default)) {
+                repair.Apply(b, null); Check(repair.RepairedThreads == 2, "Both compressed sibling and explicit compressed path remain eligible alongside missing histories");
+                Check(File.ReadAllBytes(compressed).SequenceEqual(compressedBefore) && File.ReadAllBytes(history).SequenceEqual(historyBefore), "Compressed conversation bytes and newer expression/partial history indexes remain byte-for-byte unchanged");
+                Check(File.GetLastWriteTimeUtc(compressed) == DateTimeOffset.FromUnixTimeSeconds(1730000000).UtcDateTime, "Compressed session identity is read before timestamp reconciliation");
+                repair.Restore();
+            }
             var external = Path.Combine(root, "external"); Directory.CreateDirectory(external); File.WriteAllText(Path.Combine(external, "state_5.sqlite"), "KEEP");
             var linked = Path.Combine(root, "linked"); Directory.CreateDirectory(linked);
             StoragePathChecks.CreateJunction(Path.Combine(linked, "sqlite"), external);
