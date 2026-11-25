@@ -9,7 +9,7 @@ internal static class DesktopProcessTree
 {
     // Capture only descendants of the already matched Desktop processes. A separately
     // launched CLI may use the same codex.exe as Desktop's app-server and must survive.
-    internal static void IncludeDescendants(List<Process> processes)
+    internal static void IncludeDescendants(List<Process> processes, IEnumerable<(int Id, int Parent)>? parentProcessIds = null)
     {
         foreach (var process in processes)
         {
@@ -17,7 +17,7 @@ internal static class DesktopProcessTree
             catch (InvalidOperationException) when (process.HasExited) { }
             catch (Win32Exception) when (process.HasExited) { }
         }
-        var children = ReadParentProcessIds().ToLookup(pair => pair.Parent, pair => pair.Id);
+        var children = (parentProcessIds ?? ReadParentProcessIds()).ToLookup(pair => pair.Parent, pair => pair.Id);
         var included = processes.Select(process => process.Id).ToHashSet();
         for (var index = 0; index < processes.Count; index++)
         {
@@ -33,8 +33,11 @@ internal static class DesktopProcessTree
                 try
                 {
                     child = Process.GetProcessById(id);
-                    _ = child.Handle; // Pin the process identity until close and exit verification finish.
                     // Parent PIDs in a snapshot can refer to an older process with a reused PID.
+                    // StartTime uses limited-query rights; reject stale ownership before asking
+                    // for the stronger handle needed to terminate a real descendant.
+                    if (child.HasExited || child.StartTime < parentStarted) continue;
+                    _ = child.Handle; // Pin only a verified descendant until exit verification finishes.
                     if (child.HasExited || child.StartTime < parentStarted) continue;
                     processes.Add(child);
                     included.Add(id);

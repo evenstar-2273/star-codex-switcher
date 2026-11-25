@@ -54,6 +54,7 @@ internal static class DesktopCloseChecks
             foreach (var mode in new[] { "minimized", "headless", "unresponsive" })
                 await VerifyBackgroundCloseAsync(controller, newExecutable, mode);
             await VerifyIsolationAsync(controller, newExecutable, oldExecutable);
+            await VerifyReusedParentIdAsync(controller, newExecutable);
             await VerifyProcessTreeAsync(controller, newExecutable);
             await VerifyCancellationAsync(controller, newExecutable);
             await VerifyMultipleProcessesAsync(controller, newExecutable);
@@ -122,6 +123,22 @@ internal static class DesktopCloseChecks
             "The same-named process at a different path must remain untouched.");
         await unrelated.CloseAsync(CancellationToken.None);
         Console.WriteLine("PASS: background Desktop exits; a same-named process at another path survives.");
+    }
+
+    private static async Task VerifyReusedParentIdAsync(DesktopController controller, string executable)
+    {
+        Prepare(executable, "headless");
+        await controller.OpenAsync(CancellationToken.None);
+        await WaitUntilReadyAsync(executable);
+        using (var fixture = FindFixture(executable))
+        {
+            var processes = new List<Process> { fixture! };
+            // Reproduce a snapshot retaining a parent PID from before its reuse by Desktop.
+            DesktopProcessTree.IncludeDescendants(processes, [(Environment.ProcessId, fixture!.Id)]);
+            Require(processes.Count == 1, "An older process with a reused parent PID must not join the termination tree.");
+        }
+        await controller.CloseAsync(CancellationToken.None);
+        Console.WriteLine("PASS: stale parent IDs cannot include an older unrelated process in the termination tree.");
     }
 
     private static async Task VerifyProcessTreeAsync(DesktopController controller, string executable)
